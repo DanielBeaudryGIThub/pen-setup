@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+"""Control the Wacom pen setup daemon.
+
+    wacom-pen-ctl status [--json]
+    wacom-pen-ctl set-mode mouse|tablet|native
+    wacom-pen-ctl enable                    # re-enable with the configured mode
+    wacom-pen-ctl disable                   # release pen + pad (native)
+    wacom-pen-ctl auto on|off
+    wacom-pen-ctl set-rule <class> <mouse|tablet>
+    wacom-pen-ctl del-rule <class>
+    wacom-pen-ctl add-app [mouse|tablet]    # add the focused window class
+    wacom-pen-ctl set-button <button> <action>
+    wacom-pen-ctl set-strip-sensitivity <0.25-4>
+    wacom-pen-ctl set-area <x> <y> <w> <h>   # normalized 0..1
+    wacom-pen-ctl reset-area
+    wacom-pen-ctl test-button <button>       # fire a mapped action once
+    wacom-pen-ctl apply                     # restart the daemon
+    wacom-pen-ctl active                    # focused window class
+
+Buttons: tip, stylus, stylus2, pad:0 .. pad:7, strip:0 (left), strip:1 (right)
+Actions: none, mouse:left|right|middle|back|forward, key:<combo>,
+         scroll:vertical[-inv], scroll:horizontal[-inv]   (strips only)
+"""
+
+import json
+import os
+import subprocess
+import sys
+
+CONFIG_DIR = os.path.expanduser("~/.config/wacom-pen")
+CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
+RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+SOCKET_PATH = os.path.join(RUNTIME_DIR, "wacom-pen.sock")
+UNIT = "wacom-pen.service"
+
+DEFAULT_CONFIG = {
+    "version": 2,
+    "enabled": True,
+    "mode": "mouse",
+    "auto": True,
+    "rules": {
+        "*krita*": "tablet",
+        "*gimp*": "tablet",
+        "*inkscape*": "tablet",
+        "*xournal*": "tablet",
+    },
+    "buttons": {
+        "tip": "mouse:left",
+        "stylus": "mouse:right",
+        "stylus2": "mouse:middle",
+        **{f"pad:{i}": "none" for i in range(8)},
+    },
+    "area": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+}
+
+
+def log(msg):
+    print(msg, file=sys.stderr, flush=True)
+
+
+def read_config():
+    try:
+        with open(CONFIG_PATH) as fh:
+            data = json.load(fh)
+        if isinstance(data, dict):
+            cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+            cfg.update(data)
+            buttons = dict(DEFAULT_CONFIG["buttons"])
+            buttons.update(data.get("buttons") or {})
+            cfg["buttons"] = buttons
+            area = dict(DEFAULT_CONFIG["area"])
+            area.update(data.get("area") or {})
+            cfg["area"] = area
+            return cfg
+    except (OSError, ValueError):
+        pass
+    return json.loads(json.dumps(DEFAULT_CONFIG))
+
+
+def write_config(cfg):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    tmp = f"{CONFIG_PATH}.tmp.{os.getpid()}"
+    with open(tmp, "w") as fh:
+        json.dump(cfg, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, CONFIG_PATH)
+
+
+def request(payload):
+    import socket
+
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(4)
+    try:
+        s.connect(SOCKET_PATH)
+        s.sendall((json.dumps(payload) + "\n").encode())
+        buf = b""
+        while b"\n" not in buf:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    except OSError as exc:
+        return None, str(exc)
+    finally:
+        s.close()
+    try:
+        return json.loads(buf.decode().strip() or "{}"), None
+    except ValueError as exc:
+        return None, f"bad response: {exc}"
+
+
+def hyprctl_active_class():
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    env = dict(os.environ)
+    if not sig:
+        base = os.path.join(RUNTIME_DIR, "hypr")
+        try:
+            entries = [d for d in os.listdir(base) if os.path.isdir(os.path.join(base, d))]
+        except OSError:
+            entries = []
+        if entries:
+            sig = entries[0]
+            env["HYPRLAND_INSTANCE_SIGNATURE"] = sig
+    try:
+        out = subprocess.run(
+            ["hyprctl", "activewindow", "-j"],
+            capture_output=True, text=True, timeout=2, env=env,
+        ).stdout
+        data = json.loads(out) if out.strip() else {}
+        return str(data.get("class") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def unit_state():
+    try:
+        return subprocess.run(
+            ["systemctl", "--user", "is-active", UNIT],
+            capture_output=True, text=True, timeout=2,
+        ).stdout.strip()
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def fallback_status(error=""):
+    cfg = read_config()
+    return {
+        "ok": True,
+        "daemon": False,
+        "enabled": bool(cfg.get("enabled", True)),
+        "mode": cfg.get("mode", "mouse"),
+        "auto": bool(cfg.get("auto", True)),
+        "rules": cfg.get("rules", {}),
+        "buttons": cfg.get("buttons", {}),
+        "area": cfg.get("area", {}),
+        "activeClass": hyprctl_active_class(),
+        "effectiveMode": "unknown",
+        "service": unit_state(),
+        "error": error,
+    }
+
+
+def status():
+    out, error = request({"cmd": "status"})
+    if out is None:
+        return fallback_status(error)
+    out["daemon"] = True
+    out["service"] = unit_state()
+    return out
+
+
+def mutate(payload, cfg_update):
+    """Try the daemon first; if it is down, edit config and restart it."""
+    out, error = request(payload)
+    if out is not None:
+        return out
+    cfg = read_config()
+    cfg_update(cfg)
+    write_config(cfg)
+    try:
+        subprocess.run(
+            ["systemctl", "--user", "restart", UNIT],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    out = status()
+    out["error"] = error
+    return out
+
+
+def pretty_action(action):
+    if action == "none":
+        return "none"
+    if action.startswith("mouse:"):
+        return action[6:] + " click"
+    if action.startswith("key:"):
+        return "key " + action[4:]
+    return action
+
+
+def print_status(out):
+    if "--json" in sys.argv:
+        print(json.dumps(out, indent=2))
+        return
+    print(f"daemon:        {'running' if out.get('daemon') else 'not running'}")
+    print(f"service:       {out.get('service', '?')}")
+    print(f"enabled:       {out.get('enabled')}")
+    print(f"base mode:     {out.get('mode')}")
+    print(f"effective:     {out.get('effectiveMode')}")
+    print(f"auto rules:    {out.get('auto')}")
+    print(f"pad:           {'present' if out.get('padPresent') else 'not found'}")
+    print(f"active window: {out.get('activeClass') or '-'}")
+
+    rules = out.get("rules") or {}
+    print("rules:" if rules else "rules:         none")
+    for pattern, mode in rules.items():
+        print(f"  {pattern:<28} {mode}")
+
+    buttons = out.get("buttons") or {}
+    print("button mappings:" if buttons else "button mappings: none")
+    for name, action in buttons.items():
+        print(f"  {name:<12} {pretty_action(action)}")
+
+    area = out.get("area") or {}
+    if area:
+        print(
+            "area:          "
+            f"x={area.get('x', 0):.3f} y={area.get('y', 0):.3f} "
+            f"w={area.get('w', 1):.3f} h={area.get('h', 1):.3f}"
+        )
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("status", "show"):
+        out = status()
+        print_status(out)
+        return 0 if out.get("ok") else 1
+
+    cmd = args[0]
+
+    if cmd in ("set-mode", "mode"):
+        mode = args[1] if len(args) > 1 else ""
+        if mode not in ("mouse", "tablet", "native"):
+            log("usage: wacom-pen-ctl set-mode mouse|tablet|native")
+            return 2
+        if mode == "native":
+            out = mutate({"cmd": "disable"}, lambda c: c.update(enabled=False))
+        else:
+            out = mutate(
+                {"cmd": "set-mode", "mode": mode},
+                lambda c: c.update(enabled=True, mode=mode),
+            )
+
+    elif cmd == "enable":
+        cfg = read_config()
+        out = mutate(
+            {"cmd": "set-mode", "mode": cfg.get("mode", "mouse")},
+            lambda c: c.update(enabled=True),
+        )
+
+    elif cmd == "disable":
+        out = mutate({"cmd": "disable"}, lambda c: c.update(enabled=False))
+
+    elif cmd == "auto":
+        enabled = (args[1] if len(args) > 1 else "on").lower() in ("on", "true", "1", "yes")
+        out = mutate({"cmd": "set-auto", "enabled": enabled},
+                     lambda c: c.update(auto=enabled))
+
+    elif cmd in ("set-rule", "rule"):
+        if len(args) < 3 or args[2] not in ("mouse", "tablet"):
+            log("usage: wacom-pen-ctl set-rule <class> <mouse|tablet>")
+            return 2
+        pattern, mode = args[1], args[2]
+        out = mutate(
+            {"cmd": "set-rule", "class": pattern, "mode": mode},
+            lambda c: c.setdefault("rules", {}).__setitem__(pattern, mode),
+        )
+
+    elif cmd in ("del-rule", "remove-rule"):
+        if len(args) < 2:
+            log("usage: wacom-pen-ctl del-rule <class>")
+            return 2
+        pattern = args[1]
+        out = mutate(
+            {"cmd": "remove-rule", "class": pattern},
+            lambda c: c.setdefault("rules", {}).pop(pattern, None),
+        )
+
+    elif cmd == "add-app":
+        cls = hyprctl_active_class()
+        if not cls:
+            log("no focused window")
+            return 1
+        cfg = read_config()
+        mode = args[1] if len(args) > 1 else (
+            "tablet" if cfg.get("mode", "mouse") == "mouse" else "mouse"
+        )
+        if mode not in ("mouse", "tablet"):
+            log("usage: wacom-pen-ctl add-app [mouse|tablet]")
+            return 2
+        out = mutate(
+            {"cmd": "set-rule", "class": cls, "mode": mode},
+            lambda c: c.setdefault("rules", {}).__setitem__(cls, mode),
+        )
+        log(f"{cls} -> {mode}")
+
+    elif cmd == "set-button":
+        if len(args) < 3:
+            log("usage: wacom-pen-ctl set-button <button> <action>")
+            return 2
+        button, action = args[1], args[2]
+        out = mutate(
+            {"cmd": "set-button", "button": button, "action": action},
+            lambda c: c.setdefault("buttons", {}).__setitem__(button, action),
+        )
+
+    elif cmd == "set-strip-sensitivity":
+        if len(args) < 2:
+            log("usage: wacom-pen-ctl set-strip-sensitivity <0.25-4>")
+            return 2
+        try:
+            value = float(args[1])
+        except ValueError:
+            log("sensitivity must be a number between 0.25 and 4")
+            return 2
+        value = max(0.25, min(4.0, value))
+        out = mutate(
+            {"cmd": "set-strip-sensitivity", "value": value},
+            lambda c: c.update(stripSensitivity=value),
+        )
+
+    elif cmd == "set-area":
+        if len(args) < 5:
+            log("usage: wacom-pen-ctl set-area <x> <y> <w> <h>   (0..1)")
+            return 2
+        try:
+            x, y, w, h = (float(v) for v in args[1:5])
+        except ValueError:
+            log("area values must be numbers between 0 and 1")
+            return 2
+        out = mutate(
+            {"cmd": "set-area", "x": x, "y": y, "w": w, "h": h},
+            lambda c: c.update(area={"x": x, "y": y, "w": w, "h": h}),
+        )
+
+    elif cmd == "reset-area":
+        out = mutate(
+            {"cmd": "reset-area"},
+            lambda c: c.update(area={"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}),
+        )
+
+    elif cmd == "test-button":
+        if len(args) < 2:
+            log("usage: wacom-pen-ctl test-button <button>")
+            return 2
+        out, error = request({"cmd": "test-button", "button": args[1]})
+        if out is None:
+            log(f"daemon not reachable: {error}")
+            return 1
+        print(f"fired {out.get('button')} -> {pretty_action(str(out.get('action', '')))}")
+        return 0
+
+    elif cmd == "apply":
+        try:
+            subprocess.run(
+                ["systemctl", "--user", "restart", UNIT],
+                capture_output=True, text=True, timeout=10,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log(f"restart failed: {exc}")
+            return 1
+        out = status()
+
+    elif cmd == "active":
+        print(hyprctl_active_class())
+        return 0
+
+    else:
+        log(__doc__ or "unknown command")
+        return 2
+
+    if not out or not out.get("ok"):
+        log(f"failed: {out.get('error') if out else 'no response'}")
+        return 1
+    if "--json" in args:
+        print(json.dumps(out, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

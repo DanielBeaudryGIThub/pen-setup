@@ -1,0 +1,12 @@
+# Build output
+dist/
+*.zip
+*.tar.gz
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Editors / OS
+.DS_Store
+*.swp

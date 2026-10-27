@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "enabled": true,
+  "mode": "mouse",
+  "auto": true,
+  "rules": {
+    "*krita*": "tablet",
+    "*gimp*": "tablet",
+    "*inkscape*": "tablet",
+    "*xournal*": "tablet",
+    "ai.storyteller.photocraft": "tablet"
+  },
+  "buttons": {
+    "tip": "mouse:left",
+    "stylus": "mouse:right",
+    "stylus2": "mouse:middle",
+    "pad:0": "none",
+    "pad:1": "none",
+    "pad:2": "none",
+    "pad:3": "none",
+    "pad:4": "none",
+    "pad:5": "none",
+    "pad:6": "none",
+    "pad:7": "none",
+    "strip:0": "scroll:vertical",
+    "strip:1": "scroll:vertical"
+  },
+  "stripSensitivity": 1.0,
+  "area": {
+    "x": 0.0,
+    "y": 0.0,
+    "w": 1.0,
+    "h": 1.0
+  }
+}

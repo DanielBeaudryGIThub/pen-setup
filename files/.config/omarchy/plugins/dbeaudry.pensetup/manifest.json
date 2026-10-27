@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "dbeaudry.pensetup",
+  "name": "Pen Setup",
+  "version": "1.1.0",
+  "author": "dbeaudry",
+  "license": "MIT",
+  "description": "Wacom pen control: mouse mode, pressure mode, barrel-button remap, and per-application rules.",
+  "kinds": ["bar-widget"],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Pen Setup",
+    "description": "Switch the pen between mouse and pressure modes, per app.",
+    "category": "System",
+    "aliases": ["pen", "pen setup", "wacom", "tablet", "stylus"],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
