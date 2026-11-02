@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "pen-setup",
   "name": "Pen Setup",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "author": "DanielBeaudryGIThub",
   "license": "MIT",
   "description": "Wacom pen control: mouse mode, pressure mode, barrel-button remap, and per-application rules.",
