@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Wacom pen setup daemon.
+"""Pen setup daemon for any graphics tablet.
 
-Finds a Wacom tablet by USB vendor id and capabilities (not by model name),
-owns its pen and pad, and exposes two emulation modes plus per-application
-rules, per-button action mappings, and a configurable active area. Everything
-is controlled over a small JSON socket so the Omarchy bar plugin can change
-settings without restarting anything.
+Finds a tablet by its input capabilities (a stylus pen, and a pad with express
+keys or touch strips — no vendor or model name required), owns its pen and pad,
+and exposes two emulation modes plus per-application rules, per-button action
+mappings, and a configurable active area. Everything is controlled over a small
+JSON socket so the Omarchy bar plugin can change settings without restarting
+anything.
 
 Modes
     mouse   Absolute pointer (no pressure/tilt). Tip = left, lower barrel
@@ -54,11 +55,11 @@ import time
 import evdev
 from evdev import AbsInfo, UInput, ecodes as e
 
-# Any Wacom tablet, not just one model: devices are matched by vendor id plus
-# their input capabilities. Override "devices" in ~/.config/wacom-pen/config.json
-# to narrow the search by name or to add another vendor (see README).
-WACOM_VENDOR = 0x056a
-DEFAULT_VENDORS = (WACOM_VENDOR,)
+# Any graphics tablet, not just Wacom, and not any one model: devices are
+# matched by their input capabilities (a stylus pen, and a pad with express
+# keys / touch strips), with no vendor requirement by default. Override
+# "devices" in ~/.config/wacom-pen/config.json to narrow the search by name or
+# to limit it to specific USB vendors (see README).
 # All uinput devices created by this daemon report this phys string, so they
 # can never be mistaken for the physical tablet.
 VIRTUAL_PHYS = "py-evdev-uinput"
@@ -66,9 +67,13 @@ VIRTUAL_SUFFIXES = (" Mouse", " (remapped)", " Buttons", " Keys")
 # UINPUT_MAX_NAME_SIZE is 80 bytes; keep the derived names safely below it.
 MAX_NAME_BASE = 60
 
-# Wacom pads expose their express keys as BTN_0..BTN_9 (some models use fewer,
+# Tablet pads expose their express keys as BTN_0..BTN_9 (some models use fewer,
 # some use all ten). The list is built from the pad's real capabilities.
 PAD_KEY_CODES = tuple(range(e.BTN_0, e.BTN_9 + 1))
+# A pad is only recognized as one when it exposes at least this many express
+# keys (or touch strips), so keyboards/mice with a stray BTN_0 (e.g. a craft
+# dial) are never mistaken for a tablet pad.
+MIN_PAD_KEYS = 2
 ABS_MAX = 65535
 
 CONFIG_DIR = os.path.expanduser("~/.config/wacom-pen")
@@ -137,7 +142,7 @@ DEFAULT_CONFIG = {
         "*inkscape*": "tablet",
         "*xournal*": "tablet",
     },
-    "devices": {"pen": "", "pad": "", "vendors": ["056a"]},
+    "devices": {"pen": "", "pad": "", "vendors": []},
     "buttons": dict(DEFAULT_BUTTONS),
     "stripSensitivity": 1.0,
     "area": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
@@ -217,8 +222,9 @@ def clean_devices(raw):
     """Optional discovery overrides: name substrings and USB vendor ids.
 
     Empty hints mean "pick any matching device", so the daemon works out of
-    the box on any Wacom. Vendors are kept as four-digit hex strings so the
-    config file stays readable.
+    the box on any graphics tablet. Vendors are kept as four-digit hex strings
+    so the config file stays readable; an empty list disables the vendor filter
+    (the default).
     """
     out = {"pen": "", "pad": "", "vendors": []}
     if isinstance(raw, dict):
@@ -236,8 +242,6 @@ def clean_devices(raw):
             continue
         if 0 < value <= 0xFFFF:
             out["vendors"].append(f"{value:04x}")
-    if not out["vendors"]:
-        out["vendors"] = [f"{vendor:04x}" for vendor in DEFAULT_VENDORS]
     return out
 
 
@@ -299,11 +303,11 @@ def virtual_names(source_name):
     names means the same Hyprland device rules keep matching: Hyprland turns
     "… Pen Mouse" into "…-pen-mouse".
     """
-    base = (source_name or "Wacom Tablet").strip()
+    base = (source_name or "Pen Tablet").strip()
     if base.lower().endswith(" pen"):
         base = base[:-4]
     base = base[:MAX_NAME_BASE].rstrip()
-    stem = base + " Pen" if base else "Wacom Pen"
+    stem = base + " Pen" if base else "Pen Tablet"
     return {
         "pointer": stem + " Mouse",
         "tablet": stem + " (remapped)",
@@ -329,6 +333,10 @@ def is_virtual(dev):
 
 def is_pen_device(dev, hint=""):
     keys, abs_codes = device_facts(dev)
+    # A pen interface has a stylus tool and absolute X/Y. Touch digitizers
+    # (ABS_MT_*) are excluded so a laptop touchscreen is not grabbed as a pen.
+    if e.ABS_MT_POSITION_X in abs_codes:
+        return False
     if not (e.BTN_TOOL_PEN in keys and e.ABS_X in abs_codes and e.ABS_Y in abs_codes):
         return False
     return not hint or hint in (dev.name or "").lower()
@@ -339,7 +347,8 @@ def is_pad_device(dev, hint=""):
     # The pen interface and touch digitizers are not pads.
     if e.BTN_TOOL_PEN in keys or e.ABS_MT_POSITION_X in abs_codes:
         return False
-    has_buttons = any(code in keys for code in PAD_KEY_CODES)
+    express_keys = sum(1 for code in keys if code in PAD_KEY_CODES)
+    has_buttons = express_keys >= MIN_PAD_KEYS
     has_strips = e.ABS_RX in abs_codes and e.ABS_RY in abs_codes
     if not (has_buttons or has_strips):
         return False
@@ -347,20 +356,26 @@ def is_pad_device(dev, hint=""):
 
 
 def candidate_devices(devices):
-    """Yield (dev, vendor_ok) for every readable input device."""
+    """Yield every readable input device that might be a tablet.
+
+    `devices["vendors"]` is a set of four-digit hex vendor ids; when it is
+    empty (the default) the vendor is not used as a filter and matching is done
+    purely on capabilities.
+    """
     try:
         vendors = {int(str(v), 16) for v in devices.get("vendors") or []}
     except (TypeError, ValueError):
         vendors = set()
-    if not vendors:
-        vendors = set(DEFAULT_VENDORS)
     for path in evdev.list_devices():
         try:
             dev = evdev.InputDevice(path)
         except OSError:
             continue
         try:
-            if is_virtual(dev) or dev.info.vendor not in vendors:
+            if is_virtual(dev):
+                dev.close()
+                continue
+            if vendors and dev.info.vendor not in vendors:
                 dev.close()
                 continue
         except OSError:
@@ -712,7 +727,7 @@ class PenDaemon:
         self.pad_key_index = {}
         self.strip_axes = {}
         # uinput names for the current tablet (derived from its name once it
-        # is found, so a different Wacom gets its own correctly named devices).
+        # is found, so a different tablet gets its own correctly named devices).
         self.virtual_names = None
         # Touch strip gesture state: last absolute position per strip, the
         # high-resolution scroll accumulated so far, and the fraction of a
@@ -789,6 +804,11 @@ class PenDaemon:
     def attach_pad(self):
         now = time.time()
         if self.pad is not None or now < self.last_pad_search:
+            return
+        # A pad only belongs to a tablet that also has a pen attached: never
+        # grab a keyboard/mouse (or a stray pad-like interface) while in
+        # standby waiting for a tablet.
+        if self.pen is None:
             return
         self.last_pad_search = now + 2.0
         dev = find_pad(self.cfg.get("devices") or {}, self.pen)

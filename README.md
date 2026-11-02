@@ -1,6 +1,6 @@
-# Pen Setup — Wacom pen control for Omarchy
+# Pen Setup — graphics-tablet control for Omarchy
 
-A bar widget + user daemon that turns a Wacom tablet into two switchable
+A bar widget + user daemon that turns any graphics tablet into two switchable
 personalities on [Omarchy](https://omarchy.org/) (Hyprland/Wayland):
 
 - **Mouse mode** — absolute pointer, no pressure. Pen tip = left click, lower
@@ -45,10 +45,11 @@ Grab the latest package from **[Releases](https://github.com/DanielBeaudryGIThub
   sudo pacman -S python-evdev
   ```
 
-- A Wacom tablet. The daemon auto-detects any Wacom pen and pad by USB
-  vendor id and input capabilities — there are no model-specific names to
-  edit. For a non-Wacom tablet, add its vendor id (and optional name hints)
-  under `devices` in `~/.config/wacom-pen/config.json`.
+- Any graphics tablet (Wacom, Huion, XP-Pen, …). The daemon auto-detects a
+  tablet purely by its input capabilities — a stylus pen and a pad with
+  express keys or touch strips — so there are no vendor ids or model names to
+  edit. To limit detection to specific vendors or name patterns, set
+  `devices` in `~/.config/wacom-pen/config.json`.
 - Your user must be able to read the tablet's `/dev/input/event*` nodes and
   create a `uinput` device (usually satisfied by the standard `input`/`uinput`
   udev rules on Arch; log out and back in after adding groups).

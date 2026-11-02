@@ -12,7 +12,7 @@
   "devices": {
     "pen": "",
     "pad": "",
-    "vendors": ["056a"]
+    "vendors": []
   },
   "buttons": {
     "tip": "mouse:left",

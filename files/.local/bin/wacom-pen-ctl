@@ -44,7 +44,7 @@ DEFAULT_CONFIG = {
         "*inkscape*": "tablet",
         "*xournal*": "tablet",
     },
-    "devices": {"pen": "", "pad": "", "vendors": ["056a"]},
+    "devices": {"pen": "", "pad": "", "vendors": []},
     "buttons": {
         "tip": "mouse:left",
         "stylus": "mouse:right",
