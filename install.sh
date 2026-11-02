@@ -126,7 +126,9 @@ fi
 
 # --- service --------------------------------------------------------------
 systemctl --user daemon-reload
-systemctl --user enable --now wacom-pen.service
+systemctl --user enable wacom-pen.service
+# Restart (not just enable --now) so an update actually picks up the new daemon.
+systemctl --user restart wacom-pen.service
 sleep 1
 if systemctl --user is-active --quiet wacom-pen.service; then
   say "wacom-pen.service is running"

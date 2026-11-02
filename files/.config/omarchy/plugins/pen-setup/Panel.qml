@@ -26,7 +26,7 @@ Panel {
   // build that is actually installed (a release bump changes manifest.json once).
   property string version: ""
 
-  Quickshell.Io.FileView {
+  FileView {
     id: manifestView
     path: root.manifestPath
     watchChanges: true
