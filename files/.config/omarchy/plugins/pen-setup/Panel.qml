@@ -29,7 +29,7 @@ Panel {
   Quickshell.Io.FileView {
     id: manifestView
     path: root.manifestPath
-    watchChanges: false
+    watchChanges: true
     printErrors: false
     onLoaded: {
       try {
