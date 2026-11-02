@@ -67,15 +67,22 @@ layout = data.setdefault("bar", {}).setdefault("layout", {})
 changed = False
 for side in ("left", "center", "centerBegin", "centerEnd", "right"):
     entries = layout.get(side) or []
-    if any(isinstance(e, dict) and e.get("id") == legacy for e in entries):
-        layout[side] = [e for e in entries
-                        if not (isinstance(e, dict) and e.get("id") == legacy)]
+    rebuilt = []
+    side_changed = False
+    for e in entries:
+        if isinstance(e, dict) and e.get("id") == legacy:
+            # Drop the legacy id; keep the widget's position on the right side.
+            if side == "right":
+                rebuilt.append({"id": plugin})
+            side_changed = True
+            continue
+        rebuilt.append(e)
+    if side_changed:
+        layout[side] = rebuilt
         changed = True
-        print(f"  removed legacy bar entry ({legacy}) from {side}")
+        print(f"  migrated legacy bar entry ({legacy}) on {side}")
 right = layout.setdefault("right", [])
-if any(isinstance(e, dict) and e.get("id") == plugin for e in right):
-    print(f"  bar entry already present ({plugin})")
-else:
+if not any(isinstance(e, dict) and e.get("id") == plugin for e in right):
     right.append({"id": plugin})
     changed = True
     print(f"  added {plugin} to the bar (right side)")
