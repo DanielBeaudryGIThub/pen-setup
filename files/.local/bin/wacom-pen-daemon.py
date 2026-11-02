@@ -20,16 +20,17 @@ Modes
     native  Pen and pad released untouched (no emulation). Disabling the setup
             lands here.
 
-Button actions (pen tip, both barrel buttons, all pad express keys)
+Button actions (pen tip, both barrel buttons, all pad express keys, and any
+extra pad buttons the tablet reports)
     none
     mouse:left | mouse:right | mouse:middle | mouse:back | mouse:forward
     key:<combo>            e.g. key:ctrl+z, key:alt+tab, key:f5
 
-Touch strip actions (the two strips beside the express keys)
+Touch strip / touch ring ("roulette") actions
     none
-    scroll:vertical        slide up/down -> wheel
+    scroll:vertical        turn/slide -> wheel
     scroll:vertical-inv    same, direction reversed
-    scroll:horizontal      slide up/down -> horizontal wheel
+    scroll:horizontal      turn/slide -> horizontal wheel
     scroll:horizontal-inv  same, direction reversed
 
 Active area
@@ -84,6 +85,7 @@ SOCKET_PATH = os.path.join(RUNTIME_DIR, "wacom-pen.sock")
 PEN_BUTTONS = ("tip", "stylus", "stylus2")
 PAD_BUTTONS = tuple(f"pad:{i}" for i in range(len(PAD_KEY_CODES)))
 STRIP_BUTTONS = ("strip:0", "strip:1")
+RING_BUTTONS = ("ring:0",)
 
 MOUSE_ACTIONS = {
     "left": e.BTN_LEFT,
@@ -111,6 +113,9 @@ HI_RES_PER_NOTCH = 120
 # stroke should move a page, not ten lines.
 NOTCHES_PER_SWEEP = 24.0
 HI_RES_PER_UNIT = NOTCHES_PER_SWEEP * HI_RES_PER_NOTCH / STRIP_SPAN
+# A full turn of the touch ring ("roulette") scrolls this many notches at
+# Normal speed (one wheel rotation, broadly).
+RING_NOTCHES_PER_TURN = 24.0
 # Flick acceleration: a fast stroke covers more ground than a slow one, so a
 # quick swipe scrolls a lot without making slow positioning twitchy. The
 # factor ramps from 1x at STRIP_FAST_FROM to STRIP_ACCEL_MAX at STRIP_FAST_TO
@@ -129,6 +134,7 @@ DEFAULT_BUTTONS = {
     **{f"pad:{i}": "none" for i in range(8)},
     "strip:0": "scroll:vertical",
     "strip:1": "scroll:vertical",
+    "ring:0": "scroll:vertical",
 }
 
 DEFAULT_CONFIG = {
@@ -331,6 +337,39 @@ def is_virtual(dev):
     return any(name.endswith(suffix) for suffix in VIRTUAL_SUFFIXES)
 
 
+PEN_TOOL_CODES = {
+    e.BTN_TOUCH, e.BTN_STYLUS, e.BTN_STYLUS2,
+    e.BTN_TOOL_PEN, e.BTN_TOOL_RUBBER, e.BTN_TOOL_BRUSH, e.BTN_TOOL_PENCIL,
+    e.BTN_TOOL_AIRBRUSH, e.BTN_TOOL_FINGER, e.BTN_TOOL_MOUSE, e.BTN_TOOL_LENS,
+}
+# Extra pad buttons are only surfaced in small numbers, so a device that also
+# reports a few stray KEY codes cannot flood the mapping UI.
+PAD_EXTRA_MAX = 32
+
+
+def ev_key_name(code):
+    """A stable code name (e.g. "KEY_A" or "BTN_0") for config ids."""
+    for name in evdev.ecodes.bytype.get(e.EV_KEY, {}).get(code, []):
+        if isinstance(name, str) and name:
+            return name
+    return f"KEY_0x{code:x}"
+
+
+def pad_extra_buttons(keys):
+    """Mappable pad buttons beyond the BTN_0..BTN_9 express keys.
+
+    Some tablets report their pad/express keys as keyboard KEY_* codes rather
+    than BTN codes, so those are surfaced as extra buttons. Pen tools, mouse
+    buttons, and anything the virtual keyboard cannot emit are ignored.
+    """
+    return sorted(c for c in keys if c in KEY_CODES)
+
+
+def extra_button_id(code):
+    """The config id (e.g. "extra:KEY_A") for an extra pad button."""
+    return f"extra:{ev_key_name(code)}"
+
+
 def is_pen_device(dev, hint=""):
     keys, abs_codes = device_facts(dev)
     # A pen interface has a stylus tool and absolute X/Y. Touch digitizers
@@ -350,7 +389,8 @@ def is_pad_device(dev, hint=""):
     express_keys = sum(1 for code in keys if code in PAD_KEY_CODES)
     has_buttons = express_keys >= MIN_PAD_KEYS
     has_strips = e.ABS_RX in abs_codes and e.ABS_RY in abs_codes
-    if not (has_buttons or has_strips):
+    has_ring = e.ABS_WHEEL in abs_codes
+    if not (has_buttons or has_strips or has_ring):
         return False
     return not hint or hint in (dev.name or "").lower()
 
@@ -722,10 +762,22 @@ class PenDaemon:
         self.pad_grabbed = False
         self.held = {}
         # Pad layout of the tablet that is actually connected: the express
-        # keys it exposes (BTN_0..BTN_9) and whether both touch strips exist.
+        # keys it exposes (BTN_0..BTN_9), whether both touch strips exist, a
+        # touch ring ("roulette"), and any extra keyboard-style buttons.
         self.pad_keys = []
         self.pad_key_index = {}
         self.strip_axes = {}
+        self.ring_axis = None
+        self.ring_min = 0
+        self.ring_max = 0
+        self.ring_fuzz = 0
+        self.ring_last = None
+        self.ring_acc = 0.0
+        self.ring_notch = 0.0
+        self.ring_time = None
+        self.ring_speed = 0.0
+        self.extra_keys = []
+        self.extra_key_index = {}
         # uinput names for the current tablet (derived from its name once it
         # is found, so a different tablet gets its own correctly named devices).
         self.virtual_names = None
@@ -824,9 +876,29 @@ class PenDaemon:
             self.strip_axes = dict(STRIP_AXES)
         else:
             self.strip_axes = {}
+        # Touch ring / "roulette" (some tablets report it as ABS_WHEEL).
+        if e.ABS_WHEEL in abs_codes:
+            info = dev.absinfo(e.ABS_WHEEL)
+            self.ring_axis = e.ABS_WHEEL
+            self.ring_min = info.min
+            self.ring_max = info.max
+            self.ring_fuzz = info.fuzz
+        else:
+            self.ring_axis = None
+        self.ring_last = None
+        self.ring_acc = 0.0
+        self.ring_notch = 0.0
+        self.ring_time = None
+        self.ring_speed = 0.0
+        # Extra keyboard-style buttons the pad exposes beyond its express keys.
+        self.extra_keys = pad_extra_buttons(keys)[:PAD_EXTRA_MAX]
+        self.extra_key_index = {
+            code: index for index, code in enumerate(self.extra_keys)
+        }
         log(
-            f"pad ready: {dev.name} ({dev.path}) "
-            f"keys={len(self.pad_keys)} strips={len(self.strip_axes)}"
+            f"pad ready: {dev.name} ({dev.path}) keys={len(self.pad_keys)} "
+            f"strips={len(self.strip_axes)} ring={1 if self.ring_axis else 0} "
+            f"extra={len(self.extra_keys)}"
         )
         self.apply_mode()
 
@@ -951,6 +1023,14 @@ class PenDaemon:
         self.pad_keys = []
         self.pad_key_index = {}
         self.strip_axes = {}
+        self.ring_axis = None
+        self.ring_last = None
+        self.ring_acc = 0.0
+        self.ring_notch = 0.0
+        self.ring_time = None
+        self.ring_speed = 0.0
+        self.extra_keys = []
+        self.extra_key_index = {}
 
     # -- mode ----------------------------------------------------------
 
@@ -1275,14 +1355,22 @@ class PenDaemon:
     def handle_pad_frame(self, frame):
         touch = None
         positions = []
+        ring_value = None
         for ev in frame:
-            if ev.type == e.EV_ABS and ev.code == e.ABS_MISC:
+            if ev.type != e.EV_ABS:
+                continue
+            if ev.code == e.ABS_MISC:
                 touch = ev.value
-            elif ev.type == e.EV_ABS and ev.code in self.strip_axes:
+            elif ev.code in self.strip_axes:
                 positions.append((self.strip_axes[ev.code], ev.value))
+            elif ev.code == self.ring_axis:
+                ring_value = ev.value
 
-        if DEBUG and (positions or touch is not None):
-            debug(f"pad touch={touch} positions={positions}")
+        if DEBUG and (positions or ring_value is not None or touch is not None):
+            debug(f"pad touch={touch} positions={positions} ring={ring_value}")
+
+        if ring_value is not None:
+            self.scroll_ring(ring_value)
 
         if touch == 0:
             # Finger lifted; the driver also snaps the position back to 0.
@@ -1298,10 +1386,65 @@ class PenDaemon:
             if ev.type != e.EV_KEY:
                 continue
             index = self.pad_key_index.get(ev.code)
-            if index is None:
+            if index is not None:
+                action = self.mapped_action(f"pad:{index}")
+                self.run_action(action, ev.value, "pad")
                 continue
-            action = self.mapped_action(f"pad:{index}")
-            self.run_action(action, ev.value, "pad")
+            eidx = self.extra_key_index.get(ev.code)
+            if eidx is not None:
+                action = self.mapped_action(extra_button_id(self.extra_keys[eidx]))
+                self.run_action(action, ev.value, "pad")
+
+    def scroll_ring(self, value):
+        if not self.pad_grabbed or self.buttons is None:
+            return
+        now = time.monotonic()
+        previous = self.ring_last
+        if previous is None:
+            self.ring_last = value
+            self.ring_time = now
+            self.ring_speed = 0.0
+            return
+        span = self.ring_max - self.ring_min + 1
+        delta = float(value - previous)
+        if span > 1:
+            # The ring is an absolute 360°-ish axis: wrap the shortest way.
+            if delta > span / 2:
+                delta -= span
+            elif delta < -span / 2:
+                delta += span
+        self.ring_last = value
+        dt = now - self.ring_time if self.ring_time is not None else 0.0
+        self.ring_time = now
+        if delta == 0:
+            return
+        action = self.mapped_action("ring:0")
+        scroll = SCROLL_ACTIONS.get(action)
+        if scroll is None:
+            self.ring_acc = 0.0
+            self.ring_notch = 0.0
+            self.ring_speed = 0.0
+            return
+        hi_axis, axis, sign = scroll
+        gain = self.cfg.get("stripSensitivity", 1.0)
+        if dt > 0.002:
+            instant = abs(delta) / dt
+            self.ring_speed = 0.55 * self.ring_speed + 0.45 * instant
+        speed = self.ring_speed
+        ramp = (speed - STRIP_FAST_FROM) / (STRIP_FAST_TO - STRIP_FAST_FROM)
+        factor = 1.0 + (STRIP_ACCEL_MAX - 1.0) * clamp(ramp, 0.0, 1.0)
+        scale = RING_NOTCHES_PER_TURN * HI_RES_PER_NOTCH / max(1.0, float(span))
+        self.ring_acc += delta * scale * sign * gain * factor
+        hi_ticks = int(self.ring_acc)
+        if hi_ticks:
+            self.ring_acc -= hi_ticks
+            self.buttons.write(e.EV_REL, hi_axis, hi_ticks)
+            self.ring_notch += hi_ticks
+            notches = int(self.ring_notch / HI_RES_PER_NOTCH)
+            if notches:
+                self.ring_notch -= notches * HI_RES_PER_NOTCH
+                self.buttons.write(e.EV_REL, axis, notches)
+            self.buttons.write(e.EV_SYN, e.SYN_REPORT, 0)
 
     def scroll_strip(self, positions, landing=False):
         if not self.pad_grabbed or self.buttons is None:
@@ -1399,6 +1542,8 @@ class PenDaemon:
             "padName": self.pad.name if self.pad is not None else "",
             "padButtons": len(self.pad_keys),
             "strips": len(self.strip_axes),
+            "ring": 1 if self.ring_axis is not None else 0,
+            "extraButtons": [extra_button_id(c) for c in self.extra_keys],
             "devices": {
                 "pointer": self.pointer_ok,
                 "tablet": self.tablet_ok,
@@ -1455,11 +1600,16 @@ class PenDaemon:
         elif cmd == "set-button":
             name = str(req.get("button", "")).strip()
             action = req.get("action", "")
-            if name not in PEN_BUTTONS and name not in PAD_BUTTONS and name not in STRIP_BUTTONS:
+            known = (
+                name in PEN_BUTTONS or name in PAD_BUTTONS
+                or name in STRIP_BUTTONS or name in RING_BUTTONS
+                or name.startswith("extra:")
+            )
+            if not known:
                 return {"ok": False, "error": f"unknown button: {name}"}
             if not valid_action(action):
                 return {"ok": False, "error": f"bad action: {action}"}
-            if name in STRIP_BUTTONS and action.startswith(("mouse:", "key:")):
+            if (name in STRIP_BUTTONS or name in RING_BUTTONS) and action.startswith(("mouse:", "key:")):
                 return {"ok": False, "error": f"{name} only takes scroll actions"}
             self.cfg.setdefault("buttons", {})[name] = action
             save_config(self.cfg)
@@ -1481,10 +1631,15 @@ class PenDaemon:
 
         elif cmd == "test-button":
             name = str(req.get("button", "")).strip()
-            if name not in PEN_BUTTONS and name not in PAD_BUTTONS and name not in STRIP_BUTTONS:
+            known = (
+                name in PEN_BUTTONS or name in PAD_BUTTONS
+                or name in STRIP_BUTTONS or name in RING_BUTTONS
+                or name.startswith("extra:")
+            )
+            if not known:
                 return {"ok": False, "error": f"unknown button: {name}"}
             action = self.mapped_action(name)
-            if name in STRIP_BUTTONS:
+            if name in STRIP_BUTTONS or name in RING_BUTTONS:
                 scroll = SCROLL_ACTIONS.get(action)
                 if scroll is not None and self.buttons is not None:
                     hi_axis, axis, sign = scroll

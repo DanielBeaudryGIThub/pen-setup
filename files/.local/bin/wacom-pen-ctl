@@ -17,9 +17,10 @@
     wacom-pen-ctl apply                     # restart the daemon
     wacom-pen-ctl active                    # focused window class
 
-Buttons: tip, stylus, stylus2, pad:0 .. pad:9, strip:0 (left), strip:1 (right)
+Buttons: tip, stylus, stylus2, pad:0 .. pad:9, strip:0 (left), strip:1 (right),
+         ring:0 (touch ring / roulette), extra:<EV_KEY> (extra pad buttons)
 Actions: none, mouse:left|right|middle|back|forward, key:<combo>,
-         scroll:vertical[-inv], scroll:horizontal[-inv]   (strips only)
+         scroll:vertical[-inv], scroll:horizontal[-inv]   (strips and ring only)
 """
 
 import json
@@ -52,6 +53,7 @@ DEFAULT_CONFIG = {
         **{f"pad:{i}": "none" for i in range(8)},
         "strip:0": "scroll:vertical",
         "strip:1": "scroll:vertical",
+        "ring:0": "scroll:vertical",
     },
     "area": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
 }
@@ -162,6 +164,8 @@ def fallback_status(error=""):
         "standby": False,
         "penPresent": False,
         "padPresent": False,
+        "ring": 0,
+        "extraButtons": [],
         "service": unit_state(),
         "error": error,
     }

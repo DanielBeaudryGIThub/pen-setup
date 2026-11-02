@@ -27,7 +27,8 @@
     "pad:6": "none",
     "pad:7": "none",
     "strip:0": "scroll:vertical",
-    "strip:1": "scroll:vertical"
+    "strip:1": "scroll:vertical",
+    "ring:0": "scroll:vertical"
   },
   "stripSensitivity": 1.0,
   "area": {

@@ -91,6 +91,30 @@ Panel {
     return n !== "" ? n : "Wacom tablet"
   }
 
+  // Other pad controls the connected tablet may report: a touch ring
+  // ("roulette") and any extra keyboard-style buttons beyond the express keys.
+  readonly property bool ringPresent: Number(st.ring) > 0
+  readonly property var ringMappings: {
+    var b = st.buttons || ({})
+    return root.ringPresent
+      ? [{ id: "ring:0", label: "Touch ring · roulette", action: b["ring:0"] || "none" }]
+      : []
+  }
+  readonly property var extraButtons: {
+    var arr = st.extraButtons || []
+    if (!Array.isArray(arr)) return []
+    var b = st.buttons || ({})
+    var out = []
+    for (var i = 0; i < arr.length; i++) {
+      out.push({
+        id: arr[i],
+        label: "Button · " + String(arr[i]).slice(6),
+        action: b[arr[i]] || "none"
+      })
+    }
+    return out
+  }
+
   // Tablet active-area crop (normalized 0..1 of the physical surface).
   property var area: ({ x: 0, y: 0, w: 1, h: 1 })
   property bool areaDragging: false
@@ -295,7 +319,9 @@ Panel {
     highlightButton = id
     highlightTimer.restart()
     var target = id.indexOf("pad:") === 0 ? padMappingColumn
-      : (id.indexOf("strip:") === 0 ? stripMappingColumn : mappingColumn)
+      : (id.indexOf("strip:") === 0 ? stripMappingColumn
+      : (id.indexOf("ring:") === 0 ? ringMappingColumn
+      : (id.indexOf("extra:") === 0 ? extraMappingColumn : mappingColumn)))
     flick.contentY = clamp(target.y - Style.spacing.md, 0,
                            Math.max(0, flick.contentHeight - flick.height))
   }
@@ -757,6 +783,40 @@ Panel {
               }
             }
 
+            // touch ring / "roulette", shown when the tablet reports one
+            Item {
+              id: ringDial
+              visible: root.ringPresent
+              z: 5
+              width: 34
+              height: 34
+              x: tabletGraphic.width / 2 - width / 2
+              y: 4
+
+              Rectangle {
+                anchors.fill: parent
+                radius: width / 2
+                color: Style.controlFill(false, false, root.foreground, root.accent)
+                border.width: 2
+                border.color: root.highlightButton === "ring:0"
+                  ? root.accent : Qt.darker(root.foreground, 1.7)
+              }
+
+              Rectangle {
+                anchors.centerIn: parent
+                width: 8
+                height: 8
+                radius: 4
+                color: root.highlightButton === "ring:0" ? root.accent : root.dim
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.focusMapping("ring:0")
+              }
+            }
+
             // active surface
             Item {
               id: areaSurface
@@ -1012,6 +1072,83 @@ Panel {
                 onChanged: function(v) {
                   if (String(root.stripSensitivity) === v) return
                   root.runAction(["set-strip-sensitivity", v])
+                }
+              }
+            }
+          }
+
+          Column {
+            id: ringMappingColumn
+            width: parent.width
+            spacing: Style.spacing.xs
+            visible: root.ringPresent
+
+            PanelSectionHeader {
+              text: "TOUCH RING · ROULETTE"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Text {
+              text: "Turn the ring around the pad to scroll (or to whatever you map it to)."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+              width: parent.width
+            }
+
+            Repeater {
+              model: root.ringMappings
+              delegate: Item {
+                required property var modelData
+                width: ringMappingColumn.width
+                height: ringRow.implicitHeight
+
+                MappingRow {
+                  id: ringRow
+                  width: parent.width
+                  buttonId: modelData.id
+                  buttonLabel: modelData.label
+                  kind: "strip"
+                }
+              }
+            }
+          }
+
+          Column {
+            id: extraMappingColumn
+            width: parent.width
+            spacing: Style.spacing.xs
+            visible: root.extraButtons.length > 0
+
+            PanelSectionHeader {
+              text: "EXTRA BUTTONS"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Text {
+              text: "Buttons this tablet reports beyond the express keys, remappable like any other button."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+              width: parent.width
+            }
+
+            Repeater {
+              model: root.extraButtons
+              delegate: Item {
+                required property var modelData
+                width: extraMappingColumn.width
+                height: extraRow.implicitHeight
+
+                MappingRow {
+                  id: extraRow
+                  width: parent.width
+                  buttonId: modelData.id
+                  buttonLabel: modelData.label
                 }
               }
             }
