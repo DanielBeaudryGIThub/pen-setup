@@ -91,14 +91,28 @@ Panel {
     return n !== "" ? n : "Wacom tablet"
   }
 
-  // Other pad controls the connected tablet may report: a touch ring
-  // ("roulette") and any extra keyboard-style buttons beyond the express keys.
+  // Other pad controls the connected tablet may report: a ring/dial and any
+  // keyboard-style buttons beyond the express keys.
   readonly property bool ringPresent: Number(st.ring) > 0
   readonly property var ringMappings: {
     var b = st.buttons || ({})
     return root.ringPresent
-      ? [{ id: "ring:0", label: "Touch ring · roulette", action: b["ring:0"] || "none" }]
+      ? [{ id: "ring:0", label: "Ring · turn", action: b["ring:0"] || "none" }]
       : []
+  }
+  readonly property var ringButtonMappings: {
+    var arr = st.ringButtons || []
+    if (!Array.isArray(arr)) return []
+    var b = st.buttons || ({})
+    var out = []
+    for (var i = 0; i < arr.length; i++) {
+      out.push({
+        id: arr[i],
+        label: arr.length === 1 ? "Ring button" : "Ring button " + (i + 1),
+        action: b[arr[i]] || "none"
+      })
+    }
+    return out
   }
   readonly property var extraButtons: {
     var arr = st.extraButtons || []
@@ -320,7 +334,7 @@ Panel {
     highlightTimer.restart()
     var target = id.indexOf("pad:") === 0 ? padMappingColumn
       : (id.indexOf("strip:") === 0 ? stripMappingColumn
-      : (id.indexOf("ring:") === 0 ? ringMappingColumn
+      : (id.indexOf("ring:") === 0 || id.indexOf("ring-btn:") === 0 ? ringMappingColumn
       : (id.indexOf("extra:") === 0 ? extraMappingColumn : mappingColumn)))
     flick.contentY = clamp(target.y - Style.spacing.md, 0,
                            Math.max(0, flick.contentHeight - flick.height))
@@ -580,6 +594,19 @@ Panel {
             accent: root.accent
             fontFamily: root.fontFamily
             onClicked: root.togglePressure()
+          }
+
+          Toggle {
+            width: parent.width
+            label: "Switch modes by app"
+            description: root.autoSwitch
+              ? "Rules are applied as focus changes."
+              : "Rules are ignored; the mode above is used everywhere."
+            checked: root.autoSwitch
+            foreground: root.foreground
+            accent: root.accent
+            fontFamily: root.fontFamily
+            onClicked: root.setAuto(!root.autoSwitch)
           }
 
           // --------------------------------------------------------- per-app
@@ -1084,13 +1111,13 @@ Panel {
             visible: root.ringPresent
 
             PanelSectionHeader {
-              text: "TOUCH RING · ROULETTE"
+              text: "RING"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
 
             Text {
-              text: "Turn the ring around the pad to scroll (or to whatever you map it to)."
+              text: "Turn the ring/dial to scroll (or to whatever you map it to). Its press button, if the tablet has one, is mapped below."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -1111,6 +1138,22 @@ Panel {
                   buttonId: modelData.id
                   buttonLabel: modelData.label
                   kind: "strip"
+                }
+              }
+            }
+
+            Repeater {
+              model: root.ringButtonMappings
+              delegate: Item {
+                required property var modelData
+                width: ringMappingColumn.width
+                height: ringBtnRow.implicitHeight
+
+                MappingRow {
+                  id: ringBtnRow
+                  width: parent.width
+                  buttonId: modelData.id
+                  buttonLabel: modelData.label
                 }
               }
             }
@@ -1161,19 +1204,6 @@ Panel {
             text: "GENERAL"
             foreground: root.foreground
             fontFamily: root.fontFamily
-          }
-
-          Toggle {
-            width: parent.width
-            label: "Switch modes by app"
-            description: root.autoSwitch
-              ? "Rules are applied as focus changes."
-              : "Rules are ignored; the mode above is used everywhere."
-            checked: root.autoSwitch
-            foreground: root.foreground
-            accent: root.accent
-            fontFamily: root.fontFamily
-            onClicked: root.setAuto(!root.autoSwitch)
           }
 
           Row {

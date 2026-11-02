@@ -18,7 +18,8 @@
     wacom-pen-ctl active                    # focused window class
 
 Buttons: tip, stylus, stylus2, pad:0 .. pad:9, strip:0 (left), strip:1 (right),
-         ring:0 (touch ring / roulette), extra:<EV_KEY> (extra pad buttons)
+         ring:0 (ring/dial turn), ring-btn:N (ring/dial button),
+         extra:<EV_KEY> (extra pad buttons)
 Actions: none, mouse:left|right|middle|back|forward, key:<combo>,
          scroll:vertical[-inv], scroll:horizontal[-inv]   (strips and ring only)
 """
@@ -165,6 +166,7 @@ def fallback_status(error=""):
         "penPresent": False,
         "padPresent": False,
         "ring": 0,
+        "ringButtons": [],
         "extraButtons": [],
         "service": unit_state(),
         "error": error,

@@ -20,13 +20,13 @@ Modes
     native  Pen and pad released untouched (no emulation). Disabling the setup
             lands here.
 
-Button actions (pen tip, both barrel buttons, all pad express keys, and any
-extra pad buttons the tablet reports)
+Button actions (pen tip, both barrel buttons, all pad express keys, the ring's
+press button, and any extra pad buttons the tablet reports)
     none
     mouse:left | mouse:right | mouse:middle | mouse:back | mouse:forward
     key:<combo>            e.g. key:ctrl+z, key:alt+tab, key:f5
 
-Touch strip / touch ring ("roulette") actions
+Touch strip / ring ("roulette") actions
     none
     scroll:vertical        turn/slide -> wheel
     scroll:vertical-inv    same, direction reversed
@@ -433,28 +433,57 @@ def find_pen(devices):
     return None
 
 
-def find_pad(devices, pen):
-    """Pick the best pad: most buttons, strips, and the same USB interface."""
+def find_pad_devices(devices, pen):
+    """Return the tablet's pad companion devices, each with its control roles.
+
+    A tablet can expose its pad controls across several event nodes that share
+    the pen's `phys`. Match on phys, and classify each node by capabilities so
+    express keys, touch strips, a touch ring (ABS_WHEEL) and a physical dial
+    (REL_WHEEL) are all found no matter how the vendor splits them.
+    """
+    if pen is None:
+        return []
     hint = (devices.get("pad") or "").lower()
-    best = None
-    best_score = -1
+    out = []
     for dev in candidate_devices(devices):
-        if not is_pad_device(dev, hint):
+        if dev is pen:
+            dev.close()
+            continue
+        try:
+            same_phys = dev.phys == pen.phys
+        except OSError:
+            dev.close()
+            continue
+        if not same_phys:
+            dev.close()
+            continue
+        if is_virtual(dev) or is_pen_device(dev):
+            dev.close()
+            continue
+        if hint and hint not in (dev.name or "").lower():
             dev.close()
             continue
         keys, abs_codes = device_facts(dev)
-        score = sum(1 for code in keys if code in PAD_KEY_CODES)
+        rel_codes = {c for c in dev.capabilities().get(e.EV_REL, ())}
+        roles = []
+        if sum(1 for c in keys if c in PAD_KEY_CODES) >= MIN_PAD_KEYS:
+            roles.append("keys")
         if e.ABS_RX in abs_codes and e.ABS_RY in abs_codes:
-            score += 2
-        if pen is not None and dev.phys == pen.phys:
-            score += 100
-        if score > best_score:
-            if best is not None:
-                best.close()
-            best, best_score = dev, score
-        else:
+            roles.append("strip")
+        if e.ABS_WHEEL in abs_codes:
+            roles.append("ring_abs")
+        if e.REL_WHEEL in rel_codes:
+            roles.append("ring_rel")
+        if pad_extra_buttons(keys):
+            roles.append("extra")
+        if not roles:
             dev.close()
-    return best
+            continue
+        out.append((dev, roles))
+    # Prefer the express-key node as the pad's identity; keep the rest too.
+    prio = {"keys": 4, "strip": 3, "ring_abs": 2, "ring_rel": 2, "extra": 1}
+    out.sort(key=lambda dr: -max(prio.get(r, 0) for r in dr[1]))
+    return out
 
 
 def wait_for_props(path, needles, timeout=4.0):
@@ -759,23 +788,31 @@ class PenDaemon:
         self.proximity_out_at = 0.0
         self.pad = None
         self.grabbed = False
-        self.pad_grabbed = False
+        self.pads_grabbed = False
         self.held = {}
-        # Pad layout of the tablet that is actually connected: the express
-        # keys it exposes (BTN_0..BTN_9), whether both touch strips exist, a
-        # touch ring ("roulette"), and any extra keyboard-style buttons.
+        # The tablet pad is built from one or more companion event nodes that
+        # share the pen's phys. A single device (e.g. an Intuos3 pad) can hold
+        # several roles; a tablet like the HUION Q620M splits express keys,
+        # touch strips and the dial across separate nodes. Roles:
+        #   keys     -> express keys (BTN_0..BTN_9)
+        #   strip    -> touch strips (ABS_RX / ABS_RY)
+        #   ring_abs -> touch ring reported as ABS_WHEEL
+        #   ring_rel -> physical dial reported as REL_WHEEL
+        #   extra    -> extra keyboard-style buttons
+        self.pads = []          # [(dev, [role, ...]), ...]
         self.pad_keys = []
         self.pad_key_index = {}
         self.strip_axes = {}
-        self.ring_axis = None
+        self.ring_kind = None           # "abs" or "rel" or None
         self.ring_min = 0
         self.ring_max = 0
-        self.ring_fuzz = 0
         self.ring_last = None
         self.ring_acc = 0.0
         self.ring_notch = 0.0
         self.ring_time = None
         self.ring_speed = 0.0
+        self.ring_btn_ids = []          # ["ring-btn:0", ...] dial press buttons
+        self.ring_btn_index = {}        # EV_KEY code -> index
         self.extra_keys = []
         self.extra_key_index = {}
         # uinput names for the current tablet (derived from its name once it
@@ -855,7 +892,7 @@ class PenDaemon:
 
     def attach_pad(self):
         now = time.time()
-        if self.pad is not None or now < self.last_pad_search:
+        if self.pads or now < self.last_pad_search:
             return
         # A pad only belongs to a tablet that also has a pen attached: never
         # grab a keyboard/mouse (or a stray pad-like interface) while in
@@ -863,42 +900,75 @@ class PenDaemon:
         if self.pen is None:
             return
         self.last_pad_search = now + 2.0
-        dev = find_pad(self.cfg.get("devices") or {}, self.pen)
-        if dev is None:
+        found = find_pad_devices(self.cfg.get("devices") or {}, self.pen)
+        if not found:
             return
-        self.pad = dev
-        keys, abs_codes = device_facts(dev)
-        self.pad_keys = [code for code in PAD_KEY_CODES if code in keys]
-        self.pad_key_index = {
-            code: index for index, code in enumerate(self.pad_keys)
-        }
-        if e.ABS_RX in abs_codes and e.ABS_RY in abs_codes:
-            self.strip_axes = dict(STRIP_AXES)
-        else:
-            self.strip_axes = {}
-        # Touch ring / "roulette" (some tablets report it as ABS_WHEEL).
-        if e.ABS_WHEEL in abs_codes:
-            info = dev.absinfo(e.ABS_WHEEL)
-            self.ring_axis = e.ABS_WHEEL
-            self.ring_min = info.min
-            self.ring_max = info.max
-            self.ring_fuzz = info.fuzz
-        else:
-            self.ring_axis = None
+
+        self.pads = found
+        self.pad = found[0][0]
+
+        # Reset per-tablet control state, then accumulate from each node.
+        self.pad_keys = []
+        self.pad_key_index = {}
+        self.strip_axes = {}
+        self.ring_kind = None
+        self.ring_btn_ids = []
+        self.ring_btn_index = {}
+        self.extra_keys = []
+        self.extra_key_index = {}
+
+        ring_min = ring_max = 0
+        for dev, roles in found:
+            keys, abs_codes = device_facts(dev)
+            if "keys" in roles:
+                self.pad_keys = [c for c in PAD_KEY_CODES if c in keys]
+                self.pad_key_index = {
+                    code: index for index, code in enumerate(self.pad_keys)
+                }
+            if "strip" in roles and not self.strip_axes:
+                self.strip_axes = dict(STRIP_AXES)
+            if "ring_abs" in roles and self.ring_kind is None:
+                info = dev.absinfo(e.ABS_WHEEL)
+                self.ring_kind = "abs"
+                ring_min, ring_max = info.min, info.max
+            if "ring_rel" in roles and self.ring_kind is None:
+                self.ring_kind = "rel"
+                ring_min, ring_max = 0, 0
+            if "extra" in roles:
+                self.extra_keys = pad_extra_buttons(keys)[:PAD_EXTRA_MAX]
+                self.extra_key_index = {
+                    code: index for index, code in enumerate(self.extra_keys)
+                }
+            # A dedicated dial (a ring node with no express keys) also exposes
+            # the dial's own press button(s) as mappable "ring button" controls.
+            if ("ring_abs" in roles or "ring_rel" in roles) and "keys" not in roles:
+                presses = sorted(
+                    c for c in keys
+                    if e.BTN_MISC <= c <= e.BTN_DPAD_RIGHT
+                    and c not in PEN_TOOL_CODES and c not in ALL_MOUSE_BUTTONS
+                )
+                for i, code in enumerate(presses, start=len(self.ring_btn_ids)):
+                    self.ring_btn_ids.append(f"ring-btn:{i}")
+                    self.ring_btn_index[code] = i
+
+        self.ring_min = ring_min
+        self.ring_max = ring_max
         self.ring_last = None
         self.ring_acc = 0.0
         self.ring_notch = 0.0
         self.ring_time = None
         self.ring_speed = 0.0
-        # Extra keyboard-style buttons the pad exposes beyond its express keys.
-        self.extra_keys = pad_extra_buttons(keys)[:PAD_EXTRA_MAX]
-        self.extra_key_index = {
-            code: index for index, code in enumerate(self.extra_keys)
-        }
+
+        roles_desc = [
+            f"{dev.name.split()[0] if dev.name else '?'}:{'/'.join(roles)}"
+            for dev, roles in found
+        ]
         log(
-            f"pad ready: {dev.name} ({dev.path}) keys={len(self.pad_keys)} "
-            f"strips={len(self.strip_axes)} ring={1 if self.ring_axis else 0} "
-            f"extra={len(self.extra_keys)}"
+            f"pad ready: {self.pad.name} ({self.pad.path}) "
+            f"keys={len(self.pad_keys)} strips={len(self.strip_axes)} "
+            f"ring={'yes' if self.ring_kind else 'no'} "
+            f"ringbtns={len(self.ring_btn_ids)} extra={len(self.extra_keys)} "
+            f"[{', '.join(roles_desc)}]"
         )
         self.apply_mode()
 
@@ -1007,28 +1077,33 @@ class PenDaemon:
         self.pen = None
 
     def close_pad(self):
-        if self.pad is None:
+        if not self.pads:
             return
-        try:
-            if self.pad_grabbed:
-                self.pad.ungrab()
-        except OSError:
-            pass
-        self.pad_grabbed = False
-        try:
-            self.pad.close()
-        except OSError:
-            pass
+        if self.pads_grabbed:
+            for dev, _roles in self.pads:
+                try:
+                    dev.ungrab()
+                except OSError:
+                    pass
+        self.pads_grabbed = False
+        for dev, _roles in self.pads:
+            try:
+                dev.close()
+            except OSError:
+                pass
+        self.pads = []
         self.pad = None
         self.pad_keys = []
         self.pad_key_index = {}
         self.strip_axes = {}
-        self.ring_axis = None
+        self.ring_kind = None
         self.ring_last = None
         self.ring_acc = 0.0
         self.ring_notch = 0.0
         self.ring_time = None
         self.ring_speed = 0.0
+        self.ring_btn_ids = []
+        self.ring_btn_index = {}
         self.extra_keys = []
         self.extra_key_index = {}
 
@@ -1054,7 +1129,7 @@ class PenDaemon:
         if (
             want == self.effective
             and self.grabbed == (wanted_grab and self.pen is not None)
-            and self.pad_grabbed == (wanted_grab and self.pad is not None)
+            and self.pads_grabbed == (wanted_grab and bool(self.pads))
         ):
             return
 
@@ -1084,10 +1159,11 @@ class PenDaemon:
                     self.grabbed = True
                 except OSError as exc:
                     log(f"pen grab failed: {exc}")
-        if self.pad is not None and not self.pad_grabbed:
+        if self.pads and not self.pads_grabbed:
             try:
-                self.pad.grab()
-                self.pad_grabbed = True
+                for dev, _roles in self.pads:
+                    dev.grab()
+                self.pads_grabbed = True
             except OSError as exc:
                 log(f"pad grab failed: {exc}")
         return self.grabbed
@@ -1099,12 +1175,13 @@ class PenDaemon:
             except OSError:
                 pass
             self.grabbed = False
-        if self.pad is not None and self.pad_grabbed:
-            try:
-                self.pad.ungrab()
-            except OSError:
-                pass
-            self.pad_grabbed = False
+        if self.pads and self.pads_grabbed:
+            for dev, _roles in self.pads:
+                try:
+                    dev.ungrab()
+                except OSError:
+                    pass
+            self.pads_grabbed = False
 
     # -- active area ----------------------------------------------------
 
@@ -1334,69 +1411,113 @@ class PenDaemon:
 
     # -- pad events -----------------------------------------------------
 
-    def on_pad_events(self):
+    def roles_for(self, dev):
+        for d, roles in self.pads:
+            if d is dev:
+                return roles
+        return []
+
+    def on_pad_events(self, dev):
+        roles = self.roles_for(dev)
         try:
-            events = list(self.pad.read())
+            events = list(dev.read())
         except OSError:
-            log("pad disappeared")
+            log(f"pad node disappeared: {dev.name}")
             self.close_pad()
             return
-        # The strips deliver position and the touch flag in one frame, so the
-        # frame is only interpreted once SYN_REPORT closes it.
+        # Strips/dial deliver position and buttons in one frame, so the frame
+        # is only interpreted once SYN_REPORT closes it.
         frame = []
         for ev in events:
             if ev.type != e.EV_SYN:
                 frame.append(ev)
                 continue
             if ev.code == e.SYN_REPORT and frame:
-                self.handle_pad_frame(frame)
+                self.handle_pad_frame(dev, roles, frame)
                 frame = []
 
-    def handle_pad_frame(self, frame):
-        touch = None
-        positions = []
-        ring_value = None
-        for ev in frame:
-            if ev.type != e.EV_ABS:
-                continue
-            if ev.code == e.ABS_MISC:
-                touch = ev.value
-            elif ev.code in self.strip_axes:
-                positions.append((self.strip_axes[ev.code], ev.value))
-            elif ev.code == self.ring_axis:
-                ring_value = ev.value
+    def handle_pad_frame(self, dev, roles, frame):
+        if "ring_rel" in roles:
+            self.handle_ring_rel(frame)
+        else:
+            touch = None
+            positions = []
+            ring_value = None
+            for ev in frame:
+                if ev.type != e.EV_ABS:
+                    continue
+                if ev.code == e.ABS_MISC:
+                    touch = ev.value
+                elif ev.code in self.strip_axes:
+                    positions.append((self.strip_axes[ev.code], ev.value))
+                elif ev.code == e.ABS_WHEEL:
+                    ring_value = ev.value
 
-        if DEBUG and (positions or ring_value is not None or touch is not None):
-            debug(f"pad touch={touch} positions={positions} ring={ring_value}")
+            if ring_value is not None and self.ring_kind == "abs":
+                self.scroll_ring(ring_value)
 
-        if ring_value is not None:
-            self.scroll_ring(ring_value)
-
-        if touch == 0:
-            # Finger lifted; the driver also snaps the position back to 0.
-            self.strip_last = [None, None]
-            self.strip_acc = [0.0, 0.0]
-            self.strip_notch = [0.0, 0.0]
-            self.strip_time = [None, None]
-            self.strip_speed = [0.0, 0.0]
-        elif positions:
-            self.scroll_strip(positions, landing=touch == 15)
+            if "strip" in roles:
+                if touch == 0:
+                    # Finger lifted; the driver also snaps the position back to 0.
+                    self.strip_last = [None, None]
+                    self.strip_acc = [0.0, 0.0]
+                    self.strip_notch = [0.0, 0.0]
+                    self.strip_time = [None, None]
+                    self.strip_speed = [0.0, 0.0]
+                elif positions:
+                    self.scroll_strip(positions, landing=touch == 15)
 
         for ev in frame:
             if ev.type != e.EV_KEY:
                 continue
+            value = ev.value
             index = self.pad_key_index.get(ev.code)
             if index is not None:
-                action = self.mapped_action(f"pad:{index}")
-                self.run_action(action, ev.value, "pad")
+                self.run_action(self.mapped_action(f"pad:{index}"), value, "pad")
+                continue
+            rbtn = self.ring_btn_index.get(ev.code)
+            if rbtn is not None:
+                self.run_action(self.mapped_action(self.ring_btn_ids[rbtn]), value, "pad")
                 continue
             eidx = self.extra_key_index.get(ev.code)
             if eidx is not None:
-                action = self.mapped_action(extra_button_id(self.extra_keys[eidx]))
-                self.run_action(action, ev.value, "pad")
+                self.run_action(self.mapped_action(extra_button_id(self.extra_keys[eidx])), value, "pad")
+
+    def handle_ring_rel(self, frame):
+        """A physical dial turns -> REL_WHEEL / REL_WHEEL_HI_RES. Re-emit as
+        the mapped ring scroll."""
+        if not self.pads_grabbed or self.buttons is None:
+            return
+        action = self.mapped_action("ring:0")
+        scroll = SCROLL_ACTIONS.get(action)
+        if scroll is None:
+            return
+        hi_axis, axis, sign = scroll
+        hi = 0
+        fallback = 0
+        for ev in frame:
+            if ev.type != e.EV_REL:
+                continue
+            if ev.code == e.REL_WHEEL_HI_RES:
+                hi += ev.value
+            elif ev.code == e.REL_WHEEL:
+                fallback += ev.value
+        if hi == 0 and fallback != 0:
+            hi = fallback * HI_RES_PER_NOTCH
+        if not hi:
+            return
+        gain = self.cfg.get("stripSensitivity", 1.0)
+        hi = int(round(hi * gain * sign))
+        if not hi:
+            return
+        self.buttons.write(e.EV_REL, hi_axis, hi)
+        notches = int(hi / HI_RES_PER_NOTCH)
+        if notches:
+            self.buttons.write(e.EV_REL, axis, notches)
+        self.buttons.write(e.EV_SYN, e.SYN_REPORT, 0)
 
     def scroll_ring(self, value):
-        if not self.pad_grabbed or self.buttons is None:
+        if not self.pads_grabbed or self.buttons is None or self.ring_kind != "abs":
             return
         now = time.monotonic()
         previous = self.ring_last
@@ -1447,7 +1568,7 @@ class PenDaemon:
             self.buttons.write(e.EV_SYN, e.SYN_REPORT, 0)
 
     def scroll_strip(self, positions, landing=False):
-        if not self.pad_grabbed or self.buttons is None:
+        if not self.pads_grabbed or self.buttons is None:
             return
         emitted = False
         now = time.monotonic()
@@ -1542,7 +1663,8 @@ class PenDaemon:
             "padName": self.pad.name if self.pad is not None else "",
             "padButtons": len(self.pad_keys),
             "strips": len(self.strip_axes),
-            "ring": 1 if self.ring_axis is not None else 0,
+            "ring": 1 if self.ring_kind else 0,
+            "ringButtons": list(self.ring_btn_ids),
             "extraButtons": [extra_button_id(c) for c in self.extra_keys],
             "devices": {
                 "pointer": self.pointer_ok,
@@ -1603,7 +1725,7 @@ class PenDaemon:
             known = (
                 name in PEN_BUTTONS or name in PAD_BUTTONS
                 or name in STRIP_BUTTONS or name in RING_BUTTONS
-                or name.startswith("extra:")
+                or name.startswith("ring-btn:") or name.startswith("extra:")
             )
             if not known:
                 return {"ok": False, "error": f"unknown button: {name}"}
@@ -1634,7 +1756,7 @@ class PenDaemon:
             known = (
                 name in PEN_BUTTONS or name in PAD_BUTTONS
                 or name in STRIP_BUTTONS or name in RING_BUTTONS
-                or name.startswith("extra:")
+                or name.startswith("ring-btn:") or name.startswith("extra:")
             )
             if not known:
                 return {"ok": False, "error": f"unknown button: {name}"}
@@ -1747,10 +1869,16 @@ class PenDaemon:
 
         while not STOP:
             fds = [self.server]
+            pad_by_fd = {}
             if self.pen is not None:
                 fds.append(self.pen.fd)
-            if self.pad is not None:
-                fds.append(self.pad.fd)
+            for dev, _roles in self.pads:
+                try:
+                    fd = dev.fd
+                except OSError:
+                    continue
+                fds.append(fd)
+                pad_by_fd[fd] = dev
             hypr_fd = self.hypr.fileno()
             if hypr_fd >= 0:
                 fds.append(hypr_fd)
@@ -1759,7 +1887,7 @@ class PenDaemon:
             except (OSError, ValueError):
                 if self.pen is not None:
                     self.close_pen()
-                if self.pad is not None:
+                if self.pads:
                     self.close_pad()
                 self.hypr.sock = None
                 continue
@@ -1769,8 +1897,8 @@ class PenDaemon:
                     self.accept()
                 elif self.pen is not None and fd == self.pen.fd:
                     self.on_pen_events()
-                elif self.pad is not None and fd == self.pad.fd:
-                    self.on_pad_events()
+                elif fd in pad_by_fd:
+                    self.on_pad_events(pad_by_fd[fd])
                 elif hypr_fd >= 0 and fd == hypr_fd:
                     changed = self.hypr.pump()
                     if changed or self.hypr.want_poll:
