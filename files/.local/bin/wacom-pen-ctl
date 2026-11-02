@@ -159,6 +159,9 @@ def fallback_status(error=""):
         "area": cfg.get("area", {}),
         "activeClass": hyprctl_active_class(),
         "effectiveMode": "unknown",
+        "standby": False,
+        "penPresent": False,
+        "padPresent": False,
         "service": unit_state(),
         "error": error,
     }

@@ -1143,7 +1143,7 @@ class PenDaemon:
         try:
             events = list(self.pen.read())
         except OSError:
-            log("pen disappeared")
+            log("pen disconnected; standby (waiting for a tablet)")
             self.close_pen()
             self.effective = "native"
             return
@@ -1372,6 +1372,7 @@ class PenDaemon:
             "activeClass": self.active,
             "effectiveMode": self.effective,
             "grabbed": self.grabbed,
+            "standby": bool(self.cfg.get("enabled", True)) and self.pen is None,
             "penPresent": self.pen is not None,
             "padPresent": self.pad is not None,
             "penName": self.pen.name if self.pen is not None else "",

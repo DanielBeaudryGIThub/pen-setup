@@ -64,6 +64,12 @@ Panel {
   readonly property bool autoSwitch: st.auto === true
   readonly property bool padPresent: st.padPresent === true
 
+  // Standby: the daemon is running and the plugin is enabled, but no tablet is
+  // connected. The daemon waits for a tablet and re-attaches automatically —
+  // the panel just reflects that and re-renders the new tablet's layout.
+  readonly property bool tabletConnected: st.penPresent === true || st.padPresent === true
+  readonly property bool standby: daemonUp && enabled && !tabletConnected
+
   // Tablet layout is read from the live daemon status, so the panel renders the
   // express keys and touch strips of whatever tablet is actually connected
   // instead of a fixed model. The "unknown" fallbacks (no daemon yet) draw a
@@ -80,6 +86,7 @@ Panel {
     return isFinite(n) && n > 0 ? 2 : 2
   }
   readonly property string tabletName: {
+    if (standby) return ""
     var n = String(st.penName || st.padName || "").trim()
     return n !== "" ? n : "Wacom tablet"
   }
@@ -144,6 +151,7 @@ Panel {
   readonly property string modeLabel: {
     if (!daemonUp) return "DAEMON NOT RUNNING"
     if (!enabled) return "OFF · NATIVE TABLET"
+    if (standby) return "STANDBY · WAITING FOR TABLET"
     return effective === "tablet" ? "PRESSURE MODE" : "MOUSE MODE"
   }
 
@@ -327,6 +335,16 @@ Panel {
     onTriggered: root.refresh()
   }
 
+  // Background check while the panel is closed, so the bar icon flips to its
+  // "standby" look the moment the tablet is unplugged (and back when one is
+  // plugged in again).
+  Timer {
+    interval: 3000
+    repeat: true
+    running: !root.opened
+    onTriggered: root.refresh()
+  }
+
   Process {
     id: statusProc
     command: ["wacom-pen-ctl", "status", "--json"]
@@ -392,10 +410,11 @@ Panel {
     bar: root.bar
     text: root.icon
     active: root.enabled
-    activeColor: root.accent
+    activeColor: root.standby ? root.urgent : root.accent
     tooltipText: {
       if (!root.daemonUp) return "Pen Setup · daemon not running"
       if (!root.enabled) return "Pen Setup · off (native tablet)"
+      if (root.standby) return "Pen Setup · standby — waiting for a tablet"
       return "Pen Setup · " + (root.effective === "tablet" ? "pressure" : "mouse") +
         (root.activeClass ? " · " + root.activeClass : "")
     }
@@ -635,6 +654,18 @@ Panel {
           }
 
           Text {
+            visible: root.standby
+            text: "Tablet disconnected — standing by. Plug in a tablet and it resumes automatically, with that tablet's buttons and area."
+            color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            wrapMode: Text.WordWrap
+            width: parent.width
+          }
+
+          Text {
+            visible: !root.standby
             text: root.tabletName + " · drag the corners to choose the part of the tablet that covers the whole desktop."
             color: root.dim
             font.family: root.fontFamily
@@ -648,6 +679,7 @@ Panel {
           // draggable crop rectangle.
           Item {
             id: tabletGraphic
+            visible: !root.standby
             width: parent.width
             height: Math.max(186, 40 + root.expressPerColumn * 34)
 
@@ -799,6 +831,7 @@ Panel {
           }
 
           Row {
+            visible: !root.standby
             width: parent.width
             spacing: Style.spacing.sm
 
