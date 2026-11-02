@@ -11,7 +11,7 @@ set -euo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' \
-  "$HERE/files/.config/omarchy/plugins/dbeaudry.pensetup/manifest.json")"
+  "$HERE/files/.config/omarchy/plugins/pen-setup/manifest.json")"
 NAME="Pen-Setup-$VERSION"
 DIST="$HERE/dist"
 STAGE="$DIST/$NAME"

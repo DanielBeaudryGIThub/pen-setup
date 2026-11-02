@@ -17,7 +17,7 @@
     wacom-pen-ctl apply                     # restart the daemon
     wacom-pen-ctl active                    # focused window class
 
-Buttons: tip, stylus, stylus2, pad:0 .. pad:7, strip:0 (left), strip:1 (right)
+Buttons: tip, stylus, stylus2, pad:0 .. pad:9, strip:0 (left), strip:1 (right)
 Actions: none, mouse:left|right|middle|back|forward, key:<combo>,
          scroll:vertical[-inv], scroll:horizontal[-inv]   (strips only)
 """
@@ -44,11 +44,14 @@ DEFAULT_CONFIG = {
         "*inkscape*": "tablet",
         "*xournal*": "tablet",
     },
+    "devices": {"pen": "", "pad": "", "vendors": ["056a"]},
     "buttons": {
         "tip": "mouse:left",
         "stylus": "mouse:right",
         "stylus2": "mouse:middle",
         **{f"pad:{i}": "none" for i in range(8)},
+        "strip:0": "scroll:vertical",
+        "strip:1": "scroll:vertical",
     },
     "area": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
 }

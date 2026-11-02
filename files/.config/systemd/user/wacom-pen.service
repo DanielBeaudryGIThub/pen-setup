@@ -1,5 +1,5 @@
 [Unit]
-Description=Wacom Intuos3 pen setup (mouse / pressure modes, per-app rules)
+Description=Wacom pen setup (mouse / pressure modes, per-app rules)
 Documentation=file://%h/.local/bin/wacom-pen-daemon.py
 After=graphical-session.target
 PartOf=graphical-session.target

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Wacom Intuos3 pen setup daemon.
+"""Wacom pen setup daemon.
 
-Owns the pen (and the tablet pad) and exposes two emulation modes plus
-per-application rules, per-button action mappings, and a configurable active
-area. Everything is controlled over a small JSON socket so the Omarchy bar
-plugin can change settings without restarting anything.
+Finds a Wacom tablet by USB vendor id and capabilities (not by model name),
+owns its pen and pad, and exposes two emulation modes plus per-application
+rules, per-button action mappings, and a configurable active area. Everything
+is controlled over a small JSON socket so the Omarchy bar plugin can change
+settings without restarting anything.
 
 Modes
     mouse   Absolute pointer (no pressure/tilt). Tip = left, lower barrel
@@ -53,13 +54,21 @@ import time
 import evdev
 from evdev import AbsInfo, UInput, ecodes as e
 
-SRC_HINT = "intuos3 6x11 pen"
-PAD_HINT = "intuos3 6x11 pad"
-POINTER_NAME = "Wacom Intuos3 6x11 Pen Mouse"
-TABLET_NAME = "Wacom Intuos3 6x11 Pen (remapped)"
-BUTTONS_NAME = "Wacom Intuos3 6x11 Pen Buttons"
-KEYS_NAME = "Wacom Intuos3 Pen Keys"
+# Any Wacom tablet, not just one model: devices are matched by vendor id plus
+# their input capabilities. Override "devices" in ~/.config/wacom-pen/config.json
+# to narrow the search by name or to add another vendor (see README).
+WACOM_VENDOR = 0x056a
+DEFAULT_VENDORS = (WACOM_VENDOR,)
+# All uinput devices created by this daemon report this phys string, so they
+# can never be mistaken for the physical tablet.
+VIRTUAL_PHYS = "py-evdev-uinput"
+VIRTUAL_SUFFIXES = (" Mouse", " (remapped)", " Buttons", " Keys")
+# UINPUT_MAX_NAME_SIZE is 80 bytes; keep the derived names safely below it.
+MAX_NAME_BASE = 60
 
+# Wacom pads expose their express keys as BTN_0..BTN_9 (some models use fewer,
+# some use all ten). The list is built from the pad's real capabilities.
+PAD_KEY_CODES = tuple(range(e.BTN_0, e.BTN_9 + 1))
 ABS_MAX = 65535
 
 CONFIG_DIR = os.path.expanduser("~/.config/wacom-pen")
@@ -68,7 +77,7 @@ RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
 SOCKET_PATH = os.path.join(RUNTIME_DIR, "wacom-pen.sock")
 
 PEN_BUTTONS = ("tip", "stylus", "stylus2")
-PAD_BUTTONS = tuple(f"pad:{i}" for i in range(8))
+PAD_BUTTONS = tuple(f"pad:{i}" for i in range(len(PAD_KEY_CODES)))
 STRIP_BUTTONS = ("strip:0", "strip:1")
 
 MOUSE_ACTIONS = {
@@ -128,15 +137,15 @@ DEFAULT_CONFIG = {
         "*inkscape*": "tablet",
         "*xournal*": "tablet",
     },
+    "devices": {"pen": "", "pad": "", "vendors": ["056a"]},
     "buttons": dict(DEFAULT_BUTTONS),
     "stripSensitivity": 1.0,
     "area": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
 }
 
-PAD_KEY_BASE = e.BTN_0
-PAD_KEYS = tuple(PAD_KEY_BASE + i for i in range(8))
-# The two touch strips report absolute positions on ABS_RX (left) and ABS_RY
-# (right); ABS_MISC flags touch start (15) and touch end (0).
+# Touch strips report absolute positions on ABS_RX (left) and ABS_RY (right);
+# ABS_MISC flags touch start (15) and touch end (0). Both axes are only used
+# when the pad actually has them (see attach_pad).
 STRIP_AXES = {e.ABS_RX: 0, e.ABS_RY: 1}
 
 STOP = False
@@ -204,6 +213,34 @@ def clean_gain(raw, fallback=1.0):
     return clamp(round(value, 2), 0.25, 4.0)
 
 
+def clean_devices(raw):
+    """Optional discovery overrides: name substrings and USB vendor ids.
+
+    Empty hints mean "pick any matching device", so the daemon works out of
+    the box on any Wacom. Vendors are kept as four-digit hex strings so the
+    config file stays readable.
+    """
+    out = {"pen": "", "pad": "", "vendors": []}
+    if isinstance(raw, dict):
+        out["pen"] = str(raw.get("pen", "") or "").strip()
+        out["pad"] = str(raw.get("pad", "") or "").strip()
+        items = raw.get("vendors")
+        if not isinstance(items, (list, tuple)):
+            items = [items] if items else []
+    else:
+        items = []
+    for item in items:
+        try:
+            value = int(str(item), 16) if isinstance(item, str) else int(item)
+        except (TypeError, ValueError):
+            continue
+        if 0 < value <= 0xFFFF:
+            out["vendors"].append(f"{value:04x}")
+    if not out["vendors"]:
+        out["vendors"] = [f"{vendor:04x}" for vendor in DEFAULT_VENDORS]
+    return out
+
+
 def load_config():
     try:
         with open(CONFIG_PATH) as fh:
@@ -235,6 +272,7 @@ def load_config():
                 buttons[name] = action
     cfg["buttons"] = buttons
     cfg["stripSensitivity"] = clean_gain(data.get("stripSensitivity"), 1.0)
+    cfg["devices"] = clean_devices(data.get("devices"))
     cfg["area"] = clean_area(data.get("area"))
     cfg["enabled"] = bool(cfg.get("enabled", True))
     cfg["auto"] = bool(cfg.get("auto", True))
@@ -254,38 +292,114 @@ def save_config(cfg):
 # devices
 
 
-def find_pen():
+def virtual_names(source_name):
+    """Names for the uinput devices, derived from the real tablet's name.
+
+    Keeping the source name (e.g. "Wacom Intuos Pro Pen") in the generated
+    names means the same Hyprland device rules keep matching: Hyprland turns
+    "… Pen Mouse" into "…-pen-mouse".
+    """
+    base = (source_name or "Wacom Tablet").strip()
+    if base.lower().endswith(" pen"):
+        base = base[:-4]
+    base = base[:MAX_NAME_BASE].rstrip()
+    stem = base + " Pen" if base else "Wacom Pen"
+    return {
+        "pointer": stem + " Mouse",
+        "tablet": stem + " (remapped)",
+        "buttons": stem + " Buttons",
+        "keys": stem + " Keys",
+    }
+
+
+def device_facts(dev):
+    caps = dev.capabilities()
+    keys = set(caps.get(e.EV_KEY, ()))
+    abs_codes = {code for code, _ in caps.get(e.EV_ABS, ())}
+    return keys, abs_codes
+
+
+def is_virtual(dev):
+    """True for the uinput devices this daemon creates itself."""
+    if dev.phys == VIRTUAL_PHYS:
+        return True
+    name = dev.name or ""
+    return any(name.endswith(suffix) for suffix in VIRTUAL_SUFFIXES)
+
+
+def is_pen_device(dev, hint=""):
+    keys, abs_codes = device_facts(dev)
+    if not (e.BTN_TOOL_PEN in keys and e.ABS_X in abs_codes and e.ABS_Y in abs_codes):
+        return False
+    return not hint or hint in (dev.name or "").lower()
+
+
+def is_pad_device(dev, hint=""):
+    keys, abs_codes = device_facts(dev)
+    # The pen interface and touch digitizers are not pads.
+    if e.BTN_TOOL_PEN in keys or e.ABS_MT_POSITION_X in abs_codes:
+        return False
+    has_buttons = any(code in keys for code in PAD_KEY_CODES)
+    has_strips = e.ABS_RX in abs_codes and e.ABS_RY in abs_codes
+    if not (has_buttons or has_strips):
+        return False
+    return not hint or hint in (dev.name or "").lower()
+
+
+def candidate_devices(devices):
+    """Yield (dev, vendor_ok) for every readable input device."""
+    try:
+        vendors = {int(str(v), 16) for v in devices.get("vendors") or []}
+    except (TypeError, ValueError):
+        vendors = set()
+    if not vendors:
+        vendors = set(DEFAULT_VENDORS)
     for path in evdev.list_devices():
         try:
             dev = evdev.InputDevice(path)
         except OSError:
             continue
-        name = dev.name.lower()
-        if (
-            SRC_HINT in name
-            and "remapped" not in name
-            and "mouse" not in name
-            and "buttons" not in name
-            and "pad" not in name
-            and e.BTN_TOOL_PEN in dev.capabilities().get(e.EV_KEY, ())
-        ):
-            return dev
-        dev.close()
-    return None
-
-
-def find_pad():
-    for path in evdev.list_devices():
         try:
-            dev = evdev.InputDevice(path)
+            if is_virtual(dev) or dev.info.vendor not in vendors:
+                dev.close()
+                continue
         except OSError:
+            dev.close()
             continue
-        name = dev.name.lower()
-        keys = dev.capabilities().get(e.EV_KEY, ())
-        if PAD_HINT in name and PAD_KEY_BASE in keys and "buttons" not in name:
+        yield dev
+
+
+def find_pen(devices):
+    hint = (devices.get("pen") or "").lower()
+    for dev in candidate_devices(devices):
+        if is_pen_device(dev, hint):
             return dev
         dev.close()
     return None
+
+
+def find_pad(devices, pen):
+    """Pick the best pad: most buttons, strips, and the same USB interface."""
+    hint = (devices.get("pad") or "").lower()
+    best = None
+    best_score = -1
+    for dev in candidate_devices(devices):
+        if not is_pad_device(dev, hint):
+            dev.close()
+            continue
+        keys, abs_codes = device_facts(dev)
+        score = sum(1 for code in keys if code in PAD_KEY_CODES)
+        if e.ABS_RX in abs_codes and e.ABS_RY in abs_codes:
+            score += 2
+        if pen is not None and dev.phys == pen.phys:
+            score += 100
+        if score > best_score:
+            if best is not None:
+                best.close()
+            best, best_score = dev, score
+        else:
+            dev.close()
+    return best
 
 
 def wait_for_props(path, needles, timeout=4.0):
@@ -306,7 +420,7 @@ def wait_for_props(path, needles, timeout=4.0):
     return False
 
 
-def build_pointer():
+def build_pointer(name):
     return UInput(
         {
             e.EV_ABS: [
@@ -315,12 +429,12 @@ def build_pointer():
             ],
             e.EV_KEY: list(ALL_MOUSE_BUTTONS),
         },
-        name=POINTER_NAME,
+        name=name,
         input_props=[e.INPUT_PROP_POINTER],
     )
 
 
-def build_tablet(src):
+def build_tablet(src, name):
     """Virtual tablet that keeps pressure/tilt but never emits barrel buttons.
 
     BTN_STYLUS/BTN_STYLUS2 are declared because udev only tags a device as a
@@ -346,12 +460,12 @@ def build_tablet(src):
     ]
     return UInput(
         {e.EV_ABS: abs_list, e.EV_KEY: keys},
-        name=TABLET_NAME,
+        name=name,
         input_props=[e.INPUT_PROP_POINTER],
     )
 
 
-def build_buttons():
+def build_buttons(name):
     return UInput(
         {
             e.EV_KEY: list(ALL_MOUSE_BUTTONS),
@@ -361,7 +475,7 @@ def build_buttons():
                 e.REL_WHEEL_HI_RES, e.REL_HWHEEL_HI_RES,
             ],
         },
-        name=BUTTONS_NAME,
+        name=name,
         input_props=[e.INPUT_PROP_POINTER],
     )
 
@@ -436,10 +550,10 @@ def resolve_key(name):
     return None
 
 
-def build_keyboard():
+def build_keyboard(name):
     return UInput(
         {e.EV_KEY: KEY_CODES},
-        name=KEYS_NAME,
+        name=name,
         input_props=[],
     )
 
@@ -592,6 +706,14 @@ class PenDaemon:
         self.grabbed = False
         self.pad_grabbed = False
         self.held = {}
+        # Pad layout of the tablet that is actually connected: the express
+        # keys it exposes (BTN_0..BTN_9) and whether both touch strips exist.
+        self.pad_keys = []
+        self.pad_key_index = {}
+        self.strip_axes = {}
+        # uinput names for the current tablet (derived from its name once it
+        # is found, so a different Wacom gets its own correctly named devices).
+        self.virtual_names = None
         # Touch strip gesture state: last absolute position per strip, the
         # high-resolution scroll accumulated so far, and the fraction of a
         # whole notch still owed to clients that only read REL_WHEEL.
@@ -640,13 +762,21 @@ class PenDaemon:
         if self.pen is not None or now < self.last_pen_search:
             return
         self.last_pen_search = now + 2.0
-        dev = find_pen()
+        dev = find_pen(self.cfg.get("devices") or {})
         if dev is None:
             return
         self.pen = dev
         self.ax = dev.absinfo(e.ABS_X)
         self.ay = dev.absinfo(e.ABS_Y)
         self.pos = [self.ax.value, self.ay.value]
+
+        names = virtual_names(dev.name)
+        if self.virtual_names is not None and names != self.virtual_names:
+            # A different tablet (or a renamed one) appeared: rebuild the
+            # uinput devices so their names follow the new source name.
+            log("tablet changed; rebuilding virtual devices")
+            self.close_virtual_devices()
+        self.virtual_names = names
 
         if not self.build_virtual_devices(dev):
             log("virtual devices failed; releasing pen (native tablet)")
@@ -661,17 +791,30 @@ class PenDaemon:
         if self.pad is not None or now < self.last_pad_search:
             return
         self.last_pad_search = now + 2.0
-        dev = find_pad()
+        dev = find_pad(self.cfg.get("devices") or {}, self.pen)
         if dev is None:
             return
         self.pad = dev
-        log(f"pad ready: {dev.name} ({dev.path})")
+        keys, abs_codes = device_facts(dev)
+        self.pad_keys = [code for code in PAD_KEY_CODES if code in keys]
+        self.pad_key_index = {
+            code: index for index, code in enumerate(self.pad_keys)
+        }
+        if e.ABS_RX in abs_codes and e.ABS_RY in abs_codes:
+            self.strip_axes = dict(STRIP_AXES)
+        else:
+            self.strip_axes = {}
+        log(
+            f"pad ready: {dev.name} ({dev.path}) "
+            f"keys={len(self.pad_keys)} strips={len(self.strip_axes)}"
+        )
         self.apply_mode()
 
     def build_virtual_devices(self, src):
+        names = self.virtual_names or virtual_names(src.name)
         if self.pointer is None:
             try:
-                self.pointer = build_pointer()
+                self.pointer = build_pointer(names["pointer"])
             except Exception as exc:  # noqa: BLE001
                 log(f"could not create pointer: {exc}")
                 return False
@@ -683,8 +826,8 @@ class PenDaemon:
 
         if self.tablet is None:
             try:
-                self.tablet = build_tablet(src)
-                self.buttons = build_buttons()
+                self.tablet = build_tablet(src, names["tablet"])
+                self.buttons = build_buttons(names["buttons"])
             except Exception as exc:  # noqa: BLE001
                 log(f"could not create tablet: {exc}")
                 self.close_tablet()
@@ -706,8 +849,9 @@ class PenDaemon:
     def ensure_keyboard(self):
         if self.keyboard is not None:
             return self.keyboard_ok
+        names = self.virtual_names or virtual_names("")
         try:
-            self.keyboard = build_keyboard()
+            self.keyboard = build_keyboard(names["keys"])
         except Exception as exc:  # noqa: BLE001
             log(f"could not create keyboard: {exc}")
             self.keyboard = None
@@ -719,6 +863,20 @@ class PenDaemon:
             return False
         log(f"keyboard -> {self.keyboard.device.path}")
         return True
+
+    def close_pointer(self):
+        if self.pointer is not None:
+            try:
+                self.pointer.close()
+            except OSError:
+                pass
+        self.pointer = None
+        self.pointer_ok = False
+
+    def close_virtual_devices(self):
+        self.close_tablet()
+        self.close_keyboard()
+        self.close_pointer()
 
     def close_tablet(self):
         for dev in (self.tablet, self.buttons):
@@ -770,6 +928,9 @@ class PenDaemon:
         except OSError:
             pass
         self.pad = None
+        self.pad_keys = []
+        self.pad_key_index = {}
+        self.strip_axes = {}
 
     # -- mode ----------------------------------------------------------
 
@@ -1097,8 +1258,8 @@ class PenDaemon:
         for ev in frame:
             if ev.type == e.EV_ABS and ev.code == e.ABS_MISC:
                 touch = ev.value
-            elif ev.type == e.EV_ABS and ev.code in STRIP_AXES:
-                positions.append((STRIP_AXES[ev.code], ev.value))
+            elif ev.type == e.EV_ABS and ev.code in self.strip_axes:
+                positions.append((self.strip_axes[ev.code], ev.value))
 
         if DEBUG and (positions or touch is not None):
             debug(f"pad touch={touch} positions={positions}")
@@ -1114,9 +1275,11 @@ class PenDaemon:
             self.scroll_strip(positions, landing=touch == 15)
 
         for ev in frame:
-            if ev.type != e.EV_KEY or ev.code not in PAD_KEYS:
+            if ev.type != e.EV_KEY:
                 continue
-            index = ev.code - PAD_KEY_BASE
+            index = self.pad_key_index.get(ev.code)
+            if index is None:
+                continue
             action = self.mapped_action(f"pad:{index}")
             self.run_action(action, ev.value, "pad")
 
@@ -1211,8 +1374,10 @@ class PenDaemon:
             "grabbed": self.grabbed,
             "penPresent": self.pen is not None,
             "padPresent": self.pad is not None,
-            "padButtons": len(PAD_KEYS),
-            "strips": len(STRIP_BUTTONS),
+            "penName": self.pen.name if self.pen is not None else "",
+            "padName": self.pad.name if self.pad is not None else "",
+            "padButtons": len(self.pad_keys),
+            "strips": len(self.strip_axes),
             "devices": {
                 "pointer": self.pointer_ok,
                 "tablet": self.tablet_ok,

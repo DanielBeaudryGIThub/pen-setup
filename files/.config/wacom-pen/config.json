@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "enabled": true,
   "mode": "mouse",
   "auto": true,
@@ -7,8 +7,12 @@
     "*krita*": "tablet",
     "*gimp*": "tablet",
     "*inkscape*": "tablet",
-    "*xournal*": "tablet",
-    "ai.storyteller.photocraft": "tablet"
+    "*xournal*": "tablet"
+  },
+  "devices": {
+    "pen": "",
+    "pad": "",
+    "vendors": ["056a"]
   },
   "buttons": {
     "tip": "mouse:left",

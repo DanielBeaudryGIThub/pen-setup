@@ -7,7 +7,8 @@
 set -euo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PLUGIN_ID="dbeaudry.pensetup"
+PLUGIN_ID="pen-setup"
+LEGACY_ID="dbeaudry.pensetup"   # pre-1.2 plugin id, migrated on install
 SHELL_JSON="$HOME/.config/omarchy/shell.json"
 MENU_FILE="$HOME/.config/omarchy/extensions/omarchy-menu.jsonc"
 
@@ -48,24 +49,40 @@ else
   say "installed default config: ~/.config/wacom-pen/config.json"
 fi
 
+# --- migrate from the pre-1.2 plugin id -----------------------------------
+if [ -d "$HOME/.config/omarchy/plugins/$LEGACY_ID" ]; then
+  rm -rf "$HOME/.config/omarchy/plugins/$LEGACY_ID"
+  say "removed legacy plugin folder ($LEGACY_ID)"
+fi
+
 # --- bar widget -----------------------------------------------------------
 if [ -f "$SHELL_JSON" ]; then
-  python3 - "$SHELL_JSON" "$PLUGIN_ID" <<'PY'
+  python3 - "$SHELL_JSON" "$PLUGIN_ID" "$LEGACY_ID" <<'PY'
 import json, sys
 
-path, plugin = sys.argv[1], sys.argv[2]
+path, plugin, legacy = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as fh:
     data = json.load(fh)
 layout = data.setdefault("bar", {}).setdefault("layout", {})
+changed = False
+for side in ("left", "center", "centerBegin", "centerEnd", "right"):
+    entries = layout.get(side) or []
+    if any(isinstance(e, dict) and e.get("id") == legacy for e in entries):
+        layout[side] = [e for e in entries
+                        if not (isinstance(e, dict) and e.get("id") == legacy)]
+        changed = True
+        print(f"  removed legacy bar entry ({legacy}) from {side}")
 right = layout.setdefault("right", [])
 if any(isinstance(e, dict) and e.get("id") == plugin for e in right):
     print(f"  bar entry already present ({plugin})")
 else:
     right.append({"id": plugin})
+    changed = True
+    print(f"  added {plugin} to the bar (right side)")
+if changed:
     with open(path, "w") as fh:
         json.dump(data, fh, indent=2)
         fh.write("\n")
-    print(f"  added {plugin} to the bar (right side)")
 PY
 else
   say "no shell.json found — add { \"id\": \"$PLUGIN_ID\" } to bar.layout.right yourself"
@@ -73,29 +90,36 @@ fi
 
 # --- main menu entry ------------------------------------------------------
 if [ -f "$MENU_FILE" ]; then
-  if grep -q '"pensetup"' "$MENU_FILE"; then
-    say "menu entry already present (pensetup)"
-  else
-    cp -p "$MENU_FILE" "$MENU_FILE.bak.$(date +%s)"
-    python3 - "$MENU_FILE" <<'PY'
-import sys
+  python3 - "$MENU_FILE" "$PLUGIN_ID" "$LEGACY_ID" <<'PY'
+import sys, time, shutil
 
-path = sys.argv[1]
+path, plugin, legacy = sys.argv[1], sys.argv[2], sys.argv[3]
 row = ('  "pensetup": {"icon":"\u270e","label":"Pen Setup",'
        '"aliases":["pen","pensetup","zenpen","wacom","tablet","stylus"],'
        '"description":"Mouse / pressure modes and per-app pen rules",'
-       '"action":"omarchy-shell dbeaudry.pensetup toggle"},\n')
+       '"action":"omarchy-shell ' + plugin + ' toggle"},\n')
 with open(path) as fh:
     text = fh.read()
-idx = text.rfind("}")
-if idx == -1:
-    raise SystemExit("could not find the end of the menu file")
-text = text[:idx] + row + text[idx:]
-with open(path, "w") as fh:
-    fh.write(text)
+if '"pensetup"' in text:
+    old = '"action":"omarchy-shell %s toggle"' % legacy
+    new = '"action":"omarchy-shell %s toggle"' % plugin
+    if old in text:
+        text = text.replace(old, new)
+        with open(path, "w") as fh:
+            fh.write(text)
+        print("  updated the Pen Setup menu row action")
+    else:
+        print("  menu entry already present (pensetup)")
+else:
+    shutil.copy2(path, path + ".bak." + str(int(time.time())))
+    idx = text.rfind("}")
+    if idx == -1:
+        raise SystemExit("could not find the end of the menu file")
+    text = text[:idx] + row + text[idx:]
+    with open(path, "w") as fh:
+        fh.write(text)
+    print("  added the Pen Setup row to the main menu")
 PY
-    say "added the Pen Setup row to the main menu"
-  fi
 else
   say "no menu file found — skip the Super+Space entry"
 fi

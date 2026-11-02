@@ -29,7 +29,7 @@ Grab the latest package from **[Releases](https://github.com/DanielBeaudryGIThub
 |---|---|
 | **Mouse / pressure mode** | One toggle switches the pen between a plain absolute pointer and a pressure+tilting virtual tablet. |
 | **Per-application rules** | Switch modes automatically by window class (`*krita*`, `*gimp*`, `*inkscape*`, `*xournal*` are pre-seeded). Add the focused app from the panel with one click. |
-| **Button mapping** | Pen tip, both barrel buttons, the 8 express keys and both touch strips — map each to a mouse action, a scroll action or a keyboard shortcut. |
+| **Button mapping** | Pen tip, both barrel buttons, the pad's express keys and touch strips — map each to a mouse action, a scroll action or a keyboard shortcut. |
 | **Tablet active area** | Drag the corners in the panel to crop the tablet to the part of the screen you want. |
 | **Touch strips** | Continuous high-resolution wheel events: a slow stroke scrolls ~24 notches, a quick flick accelerates up to ~2.2×. Sensitivity: Gentle / Normal / Fast / Very fast. |
 | **Bar widget + menu row** | Lives on the right side of the Omarchy bar, and opens from Super+Space (search "pen"). |
@@ -45,10 +45,10 @@ Grab the latest package from **[Releases](https://github.com/DanielBeaudryGIThub
   sudo pacman -S python-evdev
   ```
 
-- A Wacom tablet. This was written for and tested on a **Wacom Intuos3 6×11
-  (PTZ-631W)**; the device names in `files/.local/bin/wacom-pen-daemon.py`
-  (`POINTER_NAME`, `TABLET_NAME`, `BUTTONS_NAME`, `KEYS_NAME`) are the only
-  tablet-specific part — adjust them for other models.
+- A Wacom tablet. The daemon auto-detects any Wacom pen and pad by USB
+  vendor id and input capabilities — there are no model-specific names to
+  edit. For a non-Wacom tablet, add its vendor id (and optional name hints)
+  under `devices` in `~/.config/wacom-pen/config.json`.
 - Your user must be able to read the tablet's `/dev/input/event*` nodes and
   create a `uinput` device (usually satisfied by the standard `input`/`uinput`
   udev rules on Arch; log out and back in after adding groups).
@@ -59,8 +59,8 @@ From a release zip:
 
 ```bash
 cd ~/Downloads
-unzip Pen-Setup-1.1.0.zip
-cd Pen-Setup-1.1.0
+unzip Pen-Setup-<version>.zip
+cd Pen-Setup-<version>
 ./install.sh
 ```
 
@@ -76,8 +76,9 @@ The installer:
 
 1. copies the plugin, daemon, CLI, systemd unit and default config into
    `~/.config` / `~/.local`;
-2. adds `dbeaudry.pensetup` to the right side of the Omarchy bar (once — it
-   will not duplicate the entry);
+2. adds `pen-setup` to the right side of the Omarchy bar (once — it
+   will not duplicate the entry; a `dbeaudry.pensetup` entry from an older
+   release is migrated automatically);
 3. adds a **Pen Setup** row to the Super+Space menu (a `.bak` copy of the menu
    file is made first);
 4. enables and starts `wacom-pen.service`;
@@ -89,7 +90,7 @@ The installer is idempotent: re-running it keeps your existing
 ## Use
 
 - Click the pen icon in the bar, or run
-  `omarchy-shell dbeaudry.pensetup toggle`.
+  `omarchy-shell pen-setup toggle`.
 - **Mouse mode / Pressure mode** — the toggle at the top.
 - **Per-application** — rules switch modes by window class when you focus an
   app. *Add "…"* uses the currently focused window class.
@@ -154,8 +155,8 @@ install.sh                                  installer (bar + menu + service)
 uninstall.sh                                remover (keeps config by default)
 files/.local/bin/wacom-pen-daemon.py        the daemon (owns pen + pad)
 files/.local/bin/wacom-pen-ctl              CLI used by the panel
-files/.config/omarchy/plugins/dbeaudry.pensetup/
-    manifest.json                           plugin manifest
+files/.config/omarchy/plugins/pen-setup/
+    manifest.json                           plugin manifest (author, version)
     Panel.qml                               bar widget / panel UI
 files/.config/systemd/user/wacom-pen.service
 files/.config/wacom-pen/config.json         default settings

@@ -5,7 +5,8 @@
 # --purge, so a reinstall keeps your button maps, app rules and active area.
 set -euo pipefail
 
-PLUGIN_ID="dbeaudry.pensetup"
+PLUGIN_ID="pen-setup"
+LEGACY_ID="dbeaudry.pensetup"
 SHELL_JSON="$HOME/.config/omarchy/shell.json"
 PURGE=0
 [ "${1:-}" = "--purge" ] && PURGE=1
@@ -17,6 +18,7 @@ rm -f "$HOME/.config/systemd/user/wacom-pen.service"
 systemctl --user daemon-reload
 
 rm -rf "$HOME/.config/omarchy/plugins/$PLUGIN_ID"
+rm -rf "$HOME/.config/omarchy/plugins/$LEGACY_ID"
 rm -f "$HOME/.local/bin/wacom-pen-daemon.py" "$HOME/.local/bin/wacom-pen-ctl"
 
 if [ "$PURGE" = 1 ]; then
@@ -27,17 +29,18 @@ else
 fi
 
 if [ -f "$SHELL_JSON" ]; then
-  python3 - "$SHELL_JSON" "$PLUGIN_ID" <<'PY'
+  python3 - "$SHELL_JSON" "$PLUGIN_ID" "$LEGACY_ID" <<'PY'
 import json, sys
 
-path, plugin = sys.argv[1], sys.argv[2]
+path, plugin, legacy = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as fh:
     data = json.load(fh)
 layout = data.get("bar", {}).get("layout", {})
 removed = False
-for side in ("left", "center", "right"):
+for side in ("left", "center", "centerBegin", "centerEnd", "right"):
     entries = layout.get(side) or []
-    kept = [e for e in entries if not (isinstance(e, dict) and e.get("id") == plugin)]
+    kept = [e for e in entries
+            if not (isinstance(e, dict) and e.get("id") in (plugin, legacy))]
     if len(kept) != len(entries):
         layout[side] = kept
         removed = True

@@ -13,9 +13,33 @@ import qs.Ui
 // per-app rule takes effect in milliseconds without restarting a unit.
 Panel {
   id: root
-  moduleName: "dbeaudry.pensetup"
-  ipcTarget: "dbeaudry.pensetup"
+  moduleName: "pen-setup"
+  ipcTarget: "pen-setup"
   manageIpc: false
+
+  // The installed plugin's own folder, used to read its manifest version.
+  readonly property string pluginId: "pen-setup"
+  readonly property string manifestPath:
+    (Quickshell.env("HOME") || "") + "/.config/omarchy/plugins/" + pluginId + "/manifest.json"
+
+  // Installed version, read from the plugin manifest so it always matches the
+  // build that is actually installed (a release bump changes manifest.json once).
+  property string version: ""
+
+  Quickshell.Io.FileView {
+    id: manifestView
+    path: root.manifestPath
+    watchChanges: false
+    printErrors: false
+    onLoaded: {
+      try {
+        var m = JSON.parse(String(manifestView.text() || "{}"))
+        if (m && m.version) root.version = String(m.version)
+      } catch (e) {
+        root.version = ""
+      }
+    }
+  }
 
   readonly property color foreground: bar ? bar.barForeground : Color.foreground
   readonly property color accent: Color.accent
@@ -39,6 +63,26 @@ Panel {
   readonly property string activeClass: st.activeClass || ""
   readonly property bool autoSwitch: st.auto === true
   readonly property bool padPresent: st.padPresent === true
+
+  // Tablet layout is read from the live daemon status, so the panel renders the
+  // express keys and touch strips of whatever tablet is actually connected
+  // instead of a fixed model. The "unknown" fallbacks (no daemon yet) draw a
+  // full 8-key / 2-strip pad so settings stay editable.
+  readonly property int padButtonCount: {
+    var n = Number(st.padButtons)
+    if (root.padPresent) return isFinite(n) && n > 0 ? n : 0
+    return isFinite(n) && n > 0 ? n : 8
+  }
+  readonly property int expressPerColumn: Math.ceil(padButtonCount / 2)
+  readonly property int stripCount: {
+    var n = Number(st.strips)
+    if (n === 0) return 0
+    return isFinite(n) && n > 0 ? 2 : 2
+  }
+  readonly property string tabletName: {
+    var n = String(st.penName || st.padName || "").trim()
+    return n !== "" ? n : "Wacom tablet"
+  }
 
   // Tablet active-area crop (normalized 0..1 of the physical surface).
   property var area: ({ x: 0, y: 0, w: 1, h: 1 })
@@ -72,7 +116,7 @@ Panel {
   readonly property var padMappings: {
     var b = st.buttons || ({})
     var out = []
-    for (var i = 0; i < 8; i++) {
+    for (var i = 0; i < root.padButtonCount; i++) {
       var key = "pad:" + i
       out.push({ id: key, label: "Express key " + (i + 1), action: b[key] || "none" })
     }
@@ -81,10 +125,15 @@ Panel {
 
   readonly property var stripMappings: {
     var b = st.buttons || ({})
-    return [
-      { id: "strip:0", label: "Touch strip · left", action: b["strip:0"] || "none" },
-      { id: "strip:1", label: "Touch strip · right", action: b["strip:1"] || "none" }
-    ]
+    var out = []
+    for (var i = 0; i < root.stripCount; i++) {
+      out.push({
+        id: "strip:" + i,
+        label: i === 0 ? "Touch strip · left" : "Touch strip · right",
+        action: b["strip:" + i] || "none"
+      })
+    }
+    return out
   }
 
   readonly property real stripSensitivity: {
@@ -423,6 +472,18 @@ Panel {
               }
 
               Text {
+                text: (root.version !== "" ? "Version " + root.version : "") +
+                  (root.tabletName !== "" ? "  ·  " + root.tabletName : "")
+                visible: root.version !== "" || root.daemonUp
+                color: root.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                elide: Text.ElideRight
+                width: parent.width
+              }
+
+              Text {
                 text: root.modeLabel
                 color: root.dim
                 font.family: root.fontFamily
@@ -574,7 +635,7 @@ Panel {
           }
 
           Text {
-            text: "Intuos3 6x11 \u00b7 drag the corners to choose the part of the tablet that covers the whole desktop."
+            text: root.tabletName + " · drag the corners to choose the part of the tablet that covers the whole desktop."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -582,12 +643,13 @@ Panel {
             width: parent.width
           }
 
-          // Stylised Intuos3: body, 8 express keys (left/right columns), and
-          // the active surface with a draggable crop rectangle.
+          // Generic pad: express keys (two columns) and touch strips are drawn
+          // from the live tablet layout, plus the active surface with a
+          // draggable crop rectangle.
           Item {
             id: tabletGraphic
             width: parent.width
-            height: 186
+            height: Math.max(186, 40 + root.expressPerColumn * 34)
 
             Rectangle {
               anchors.fill: parent
@@ -597,13 +659,13 @@ Panel {
               border.color: Qt.darker(root.foreground, 1.9)
             }
 
-            // express keys, four per side, mapping pad:0..pad:7
+            // express keys, drawn from the detected pad layout
             Repeater {
-              model: 8
+              model: root.padPresent ? root.padButtonCount : 0
               delegate: Rectangle {
                 required property int index
-                readonly property int columnIndex: index < 4 ? 0 : 1
-                readonly property int rowIndex: index % 4
+                readonly property int columnIndex: index < root.expressPerColumn ? 0 : 1
+                readonly property int rowIndex: index % root.expressPerColumn
                 x: columnIndex === 0 ? 12 : tabletGraphic.width - 12 - width
                 y: 28 + rowIndex * 34
                 width: 22
@@ -636,9 +698,9 @@ Panel {
               }
             }
 
-            // touch strips, inset between the express keys and the surface
+            // touch strips, only when the pad reports them
             Repeater {
-              model: 2
+              model: root.stripCount
               delegate: Rectangle {
                 required property int index
                 readonly property string keyId: "strip:" + index
@@ -848,7 +910,7 @@ Panel {
             id: stripMappingColumn
             width: parent.width
             spacing: Style.spacing.xs
-            visible: root.padPresent
+            visible: root.padPresent && root.stripCount > 0
 
             PanelSectionHeader {
               text: "TOUCH STRIPS"
