@@ -11,6 +11,10 @@ PLUGIN_ID="pen-setup"
 LEGACY_ID="dbeaudry.pensetup"   # pre-1.2 plugin id, migrated on install
 SHELL_JSON="$HOME/.config/omarchy/shell.json"
 MENU_FILE="$HOME/.config/omarchy/extensions/omarchy-menu.jsonc"
+UDEV_RULE_SRC="$HERE/files/etc/udev/rules.d/70-wacom-pen.rules"
+UDEV_RULE_DST="/etc/udev/rules.d/70-wacom-pen.rules"
+MODULE_CONF_SRC="$HERE/files/etc/modules-load.d/wacom-pen.conf"
+MODULE_CONF_DST="/etc/modules-load.d/wacom-pen.conf"
 
 say() { printf '  %s\n' "$*"; }
 
@@ -48,6 +52,58 @@ else
   install -m 644 "$HERE/files/.config/wacom-pen/config.json" "$HOME/.config/wacom-pen/config.json"
   say "installed default config: ~/.config/wacom-pen/config.json"
 fi
+
+# --- device permissions ---------------------------------------------------
+# Arch keeps /dev/input/event* in the input group and /dev/uinput root-only,
+# so the user service can neither see a tablet nor create its virtual devices.
+# A udev rule granting uaccess to the active seat user fixes both without a
+# logout (and without adding the user to the input group). The uinput module
+# is not loaded by default, so it is placed in modules-load.d too.
+SUDO=()
+if command -v sudo >/dev/null 2>&1; then
+  if [ -t 0 ]; then
+    SUDO=(sudo)
+  elif sudo -n true >/dev/null 2>&1; then
+    SUDO=(sudo -n)
+  fi
+fi
+
+install_root_file() {
+  local src="$1"
+  local dst="$2"
+  local label="$3"
+  [ -f "$src" ] || return 0
+  if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
+    say "$label already installed: $dst"
+    return 0
+  fi
+  if [ ${#SUDO[@]} -eq 0 ]; then
+    say "SKIPPED $label: sudo is needed to install $dst"
+    say "run: sudo install -m 644 '$src' '$dst'"
+    return 0
+  fi
+  say "installing $label"
+  if ! "${SUDO[@]}" install -m 644 "$src" "$dst"; then
+    echo "WARNING: could not install $dst" >&2
+  fi
+}
+
+install_device_access() {
+  install_root_file "$UDEV_RULE_SRC" "$UDEV_RULE_DST" "the tablet udev rule"
+  install_root_file "$MODULE_CONF_SRC" "$MODULE_CONF_DST" "the uinput module-load rule"
+  if [ ${#SUDO[@]} -eq 0 ]; then
+    say "then: sudo modprobe uinput"
+    say "and:  sudo udevadm control --reload-rules && sudo udevadm trigger --action=change --subsystem-match=input"
+    return 0
+  fi
+  say "loading the uinput module (sudo password may be required once)"
+  "${SUDO[@]}" modprobe uinput >/dev/null 2>&1 || true
+  "${SUDO[@]}" udevadm control --reload-rules >/dev/null 2>&1 || true
+  "${SUDO[@]}" udevadm trigger --action=change --subsystem-match=input >/dev/null 2>&1 || true
+  "${SUDO[@]}" udevadm trigger --action=change --name-match=/dev/uinput >/dev/null 2>&1 || true
+}
+
+install_device_access
 
 # --- migrate from the pre-1.2 plugin id -----------------------------------
 if [ -d "$HOME/.config/omarchy/plugins/$LEGACY_ID" ]; then

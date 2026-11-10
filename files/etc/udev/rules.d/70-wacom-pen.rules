@@ -1,0 +1,23 @@
+# Pen Setup — grant the active seat user access to graphics tablets.
+#
+# Arch ships /dev/input/event* as root:input and /dev/uinput as root:root, so a
+# user service cannot read the tablet or create the virtual pointer/tablet
+# unless it is in the "input" group. TAG+="uaccess" gives the logged-in user an
+# ACL immediately (no logout, no group change) while leaving the devices
+# inaccessible to other users.
+
+ACTION=="remove", GOTO="wacom_pen_end"
+
+# Pen and pad nodes tagged as tablets by 60-input-id.rules.
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_TABLET}=="1", TAG+="uaccess"
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_TABLET_PAD}=="1", TAG+="uaccess"
+
+# The virtual pointer/tablet/buttons/keyboard themselves must be readable by
+# the compositor (Hyprland is also just the logged-in user), not only writable
+# by the daemon.
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{phys}=="py-evdev-uinput", TAG+="uaccess"
+
+# Creating virtual devices (pointer, tablet, buttons, keyboard) needs uinput.
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess"
+
+LABEL="wacom_pen_end"

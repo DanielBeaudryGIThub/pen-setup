@@ -28,6 +28,8 @@ Grab the latest package from **[Releases](https://github.com/DanielBeaudryGIThub
 | | |
 |---|---|
 | **Mouse / pressure mode** | One toggle switches the pen between a plain absolute pointer and a pressure+tilting virtual tablet. |
+| **Pressure sensitivity** | Four levels (Firm / Normal / Soft / Very soft) scale how quickly pen pressure builds up in pressure mode. |
+| **Stable tip clicks** | While the tip is down, up to 2 px of hand shake is ignored so a tap stays a clean click instead of drifting into a drag. |
 | **Per-application rules** | Switch modes automatically by window class (`*krita*`, `*gimp*`, `*inkscape*`, `*xournal*` are pre-seeded). Add the focused app from the panel with one click. |
 | **Button mapping** | Pen tip, both barrel buttons, the pad's express keys and touch strips — map each to a mouse action, a scroll action or a keyboard shortcut. |
 | **Tablet active area** | Drag the corners in the panel to crop the tablet to the part of the screen you want. |
@@ -51,8 +53,11 @@ Grab the latest package from **[Releases](https://github.com/DanielBeaudryGIThub
   edit. To limit detection to specific vendors or name patterns, set
   `devices` in `~/.config/wacom-pen/config.json`.
 - Your user must be able to read the tablet's `/dev/input/event*` nodes and
-  create a `uinput` device (usually satisfied by the standard `input`/`uinput`
-  udev rules on Arch; log out and back in after adding groups).
+  create a `uinput` device. The installer adds
+  `/etc/udev/rules.d/70-wacom-pen.rules` (access through `uaccess`, no logout
+  or group change needed) and `/etc/modules-load.d/wacom-pen.conf` (loads the
+  `uinput` module). Run `./install.sh` from a terminal so it can ask for sudo
+  once; if you copy the files by hand, install those files yourself as well.
 
 ## Install
 
@@ -77,13 +82,16 @@ The installer:
 
 1. copies the plugin, daemon, CLI, systemd unit and default config into
    `~/.config` / `~/.local`;
-2. adds `pen-setup` to the right side of the Omarchy bar (once — it
+2. installs `/etc/udev/rules.d/70-wacom-pen.rules` and
+   `/etc/modules-load.d/wacom-pen.conf` (asks for sudo once) and loads `uinput`
+   so the daemon can read the tablet and create virtual input devices;
+3. adds `pen-setup` to the right side of the Omarchy bar (once — it
    will not duplicate the entry; a `dbeaudry.pensetup` entry from an older
    release is migrated automatically);
-3. adds a **Pen Setup** row to the Super+Space menu (a `.bak` copy of the menu
+4. adds a **Pen Setup** row to the Super+Space menu (a `.bak` copy of the menu
    file is made first);
-4. enables and starts `wacom-pen.service`;
-5. restarts the Omarchy shell so the widget appears.
+5. enables and starts `wacom-pen.service`;
+6. restarts the Omarchy shell so the widget appears.
 
 The installer is idempotent: re-running it keeps your existing
 `~/.config/wacom-pen/config.json` and bar layout.
@@ -98,6 +106,9 @@ The installer is idempotent: re-running it keeps your existing
 - **Tablet · Active area** — drag the corner handles to crop.
 - **Button mapping** — pen tip, barrel buttons, express keys, touch strips.
 - **Scroll sensitivity** — Gentle / Normal / Fast / Very fast.
+- **Pressure sensitivity** — Firm / Normal / Soft / Very soft.
+- **Tip click stabilisation** — movement under 2 px while the tip is down is
+  treated as shake, so a tap does not turn into a drag.
 - **Switch modes by app** — turn the per-app rules on or off.
 
 ### Touch strips
@@ -116,6 +127,7 @@ wacom-pen-ctl status
 wacom-pen-ctl set-mode mouse|tablet|native
 wacom-pen-ctl set-button stylus "key:ctrl+z"
 wacom-pen-ctl set-strip-sensitivity 1.75
+wacom-pen-ctl set-pressure-sensitivity 2
 wacom-pen-ctl reset-area
 ```
 
@@ -127,6 +139,13 @@ Your settings live in `~/.config/wacom-pen/config.json`.
 - **Widget missing from the bar** — `omarchy restart shell` (a full shell
   restart is required after plugin changes; `rescanPlugins` alone is not
   enough).
+- **Tablet is plugged in but the panel says "input access denied"** — the
+  daemon cannot open `/dev/input/event*` or `/dev/uinput`. Re-run `./install.sh`
+  from a terminal to install the udev rule, then
+  `systemctl --user restart wacom-pen.service`. (If you installed by hand,
+  install `files/etc/udev/rules.d/70-wacom-pen.rules` and
+  `files/etc/modules-load.d/wacom-pen.conf` under `/etc`, then run
+  `sudo modprobe uinput && sudo udevadm control --reload-rules && sudo udevadm trigger --action=change --subsystem-match=input`.)
 - **Daemon exits with "virtual pointer not registered"** — another process may
   hold the pen; stop old helper scripts and restart
   `systemctl --user restart wacom-pen.service`.
@@ -161,6 +180,8 @@ files/.config/omarchy/plugins/pen-setup/
     Panel.qml                               bar widget / panel UI
 files/.config/systemd/user/wacom-pen.service
 files/.config/wacom-pen/config.json         default settings
+files/etc/udev/rules.d/70-wacom-pen.rules   tablet + uinput access for the user
+files/etc/modules-load.d/wacom-pen.conf     loads the uinput module
 scripts/package.sh                          builds the release zip in dist/
 docs/panel.png                              screenshot used above
 ```

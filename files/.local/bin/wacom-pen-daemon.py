@@ -38,12 +38,18 @@ Active area
     that is stretched over the whole screen. Applies in both mouse and tablet
     mode, so cropping the tablet here crops it for every application.
 
+Tip stabilisation
+    While the pen tip is in contact, movement within a 2-pixel radius of the
+    press point is treated as hand shake and is not forwarded. This keeps a tap
+    a clean click instead of letting tiny movement turn it into a drag.
+
 Control socket: $XDG_RUNTIME_DIR/wacom-pen.sock
 Config:         ~/.config/wacom-pen/config.json
 CLI:            wacom-pen-ctl
 """
 
 import fnmatch
+import glob
 import json
 import os
 import select
@@ -76,6 +82,11 @@ PAD_KEY_CODES = tuple(range(e.BTN_0, e.BTN_9 + 1))
 # dial) are never mistaken for a tablet pad.
 MIN_PAD_KEYS = 2
 ABS_MAX = 65535
+# A pen tap must stay a click. While the tip is down, pointer movement within
+# this radius (in screen pixels) is treated as hand shake and not forwarded,
+# so a micro-movement cannot turn the click into a drag before it is released.
+CLICK_SHAKE_PX = 2.0
+SCREEN_SPAN_TTL = 30.0
 
 CONFIG_DIR = os.path.expanduser("~/.config/wacom-pen")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
@@ -151,6 +162,7 @@ DEFAULT_CONFIG = {
     "devices": {"pen": "", "pad": "", "vendors": []},
     "buttons": dict(DEFAULT_BUTTONS),
     "stripSensitivity": 1.0,
+    "pressureSensitivity": 1.0,
     "area": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
 }
 
@@ -282,6 +294,7 @@ def load_config():
                 buttons[name] = action
     cfg["buttons"] = buttons
     cfg["stripSensitivity"] = clean_gain(data.get("stripSensitivity"), 1.0)
+    cfg["pressureSensitivity"] = clean_gain(data.get("pressureSensitivity"), 1.0)
     cfg["devices"] = clean_devices(data.get("devices"))
     cfg["area"] = clean_area(data.get("area"))
     cfg["enabled"] = bool(cfg.get("enabled", True))
@@ -335,6 +348,115 @@ def is_virtual(dev):
         return True
     name = dev.name or ""
     return any(name.endswith(suffix) for suffix in VIRTUAL_SUFFIXES)
+
+
+def read_sysfs_bitmap(path):
+    """Read a sysfs capabilities bitmap (most-significant word first)."""
+    try:
+        with open(path) as fh:
+            words = fh.read().split()
+    except OSError:
+        return set()
+    value = 0
+    for word in words:
+        try:
+            value = (value << 64) | int(word, 16)
+        except ValueError:
+            return set()
+    return {i for i in range(value.bit_length()) if value >> i & 1}
+
+
+def inaccessible_tablets():
+    """Tablet event nodes that exist but this user cannot open.
+
+    evdev.list_devices() only reports nodes the process can read, so a tablet
+    hidden by device permissions looks exactly like an empty machine. Ask the
+    kernel through sysfs (world-readable) instead, so the panel can say the
+    tablet is there but access is denied rather than pretending it is absent.
+    """
+    found = []
+    for path in sorted(glob.glob("/dev/input/event*")):
+        if os.access(path, os.R_OK):
+            continue
+        sysdir = os.path.join(
+            "/sys/class/input", os.path.basename(path), "device"
+        )
+        try:
+            with open(os.path.join(sysdir, "name")) as fh:
+                name = fh.read().strip()
+        except OSError:
+            continue
+        keys = read_sysfs_bitmap(os.path.join(sysdir, "capabilities", "key"))
+        abs_codes = read_sysfs_bitmap(
+            os.path.join(sysdir, "capabilities", "abs")
+        )
+        if e.BTN_TOOL_PEN in keys and e.ABS_X in abs_codes and e.ABS_Y in abs_codes:
+            found.append({"path": path, "name": name})
+    return found
+
+
+def uinput_device_path(ui, timeout=2.0):
+    """Find the event node created by a UInput without opening it.
+
+    python-evdev's UInput.device is None when the new node is not readable yet
+    (or when its sysfs lookup fails on newer kernels). The daemon only needs the
+    path for udevadm, so locate it through sysfs instead of crashing on
+    ``ui.device.path``.
+    """
+    if ui.device is not None:
+        return ui.device.path
+    deadline = time.time() + timeout
+    while True:
+        for sysdir in sorted(glob.glob("/sys/devices/virtual/input/input*")):
+            try:
+                with open(os.path.join(sysdir, "name")) as fh:
+                    name = fh.read().strip()
+                with open(os.path.join(sysdir, "phys")) as fh:
+                    phys = fh.read().strip()
+            except OSError:
+                continue
+            if name != ui.name or (phys and phys != VIRTUAL_PHYS):
+                continue
+            for entry in sorted(os.listdir(sysdir)):
+                if entry.startswith("event") and entry[5:].isdigit():
+                    path = os.path.join("/dev/input", entry)
+                    if os.path.exists(path):
+                        return path
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.05)
+
+
+def permission_state():
+    """Describe whether this user can reach the tablet and /dev/uinput."""
+    tablets = inaccessible_tablets()
+    input_ok = not tablets
+    uinput_ok = os.access("/dev/uinput", os.W_OK)
+    if not input_ok and not uinput_ok:
+        hint = (
+            "A tablet is connected but Pen Setup cannot read its "
+            "/dev/input nodes or create /dev/uinput devices. Re-run "
+            "./install.sh to install the udev rule, then restart the daemon."
+        )
+    elif not input_ok:
+        hint = (
+            "A tablet is connected but Pen Setup cannot read its "
+            "/dev/input nodes. Re-run ./install.sh to install the udev rule."
+        )
+    elif not uinput_ok:
+        hint = (
+            "Pen Setup cannot create /dev/uinput devices. Re-run ./install.sh "
+            "to install the udev rule."
+        )
+    else:
+        hint = ""
+    return {
+        "input": input_ok,
+        "uinput": uinput_ok,
+        "tablets": tablets,
+        "denied": not (input_ok and uinput_ok),
+        "hint": hint,
+    }
 
 
 PEN_TOOL_CODES = {
@@ -681,6 +803,46 @@ def hyprctl_active_class():
         return ""
 
 
+def hyprctl_screen_span():
+    """Logical size of the Hyprland monitor layout, for pixel-sized thresholds."""
+    env = dict(os.environ)
+    sig = hypr_signature()
+    if sig:
+        env["HYPRLAND_INSTANCE_SIGNATURE"] = sig
+    try:
+        out = subprocess.run(
+            ["hyprctl", "monitors", "-j"],
+            capture_output=True, text=True, timeout=2, env=env,
+        ).stdout
+        monitors = json.loads(out) if out.strip() else []
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(monitors, list) or not monitors:
+        return None
+
+    left = top = right = bottom = None
+    for monitor in monitors:
+        try:
+            scale = float(monitor.get("scale") or 1.0)
+            if scale <= 0:
+                scale = 1.0
+            x = float(monitor.get("x", 0))
+            y = float(monitor.get("y", 0))
+            w = float(monitor.get("width", 0)) / scale
+            h = float(monitor.get("height", 0)) / scale
+        except (TypeError, ValueError):
+            continue
+        if w <= 0 or h <= 0:
+            continue
+        left = x if left is None else min(left, x)
+        top = y if top is None else min(top, y)
+        right = x + w if right is None else max(right, x + w)
+        bottom = y + h if bottom is None else max(bottom, y + h)
+    if left is None or right is None or right <= left or bottom <= top:
+        return None
+    return round(right - left), round(bottom - top)
+
+
 class HyprWatcher:
     """Subscribes to Hyprland's event socket; falls back to polling."""
 
@@ -777,6 +939,7 @@ class PenDaemon:
         self.pen = None
         self.ax = None
         self.ay = None
+        self.press = None
         self.pos = [0, 0]
         # Pen proximity (None = not seen yet, True = hovering, False = lifted).
         # Mouse mode uses it to ignore the coordinates a tablet reports while
@@ -785,6 +948,23 @@ class PenDaemon:
         self.proximity = None
         self.screen_pos = None
         self.frame_pos = None
+        # Click shake stabilisation: while the tip is in contact, small
+        # movements around the press point are held back until the pointer has
+        # travelled CLICK_SHAKE_PX pixels.
+        self.tip_down = False
+        self.click_anchor = None
+        self.click_unlocked = False
+        # Which virtual button the current tip contact is holding. Tracking it
+        # lets the daemon repair a missed press/release instead of leaving the
+        # virtual mouse stuck or dropping a tap.
+        self.tip_button = None
+        self.tip_device = None
+        # Set when release_all() already let the tip button go (mode switch,
+        # disable, config reload). The physical release that follows must not
+        # be turned into a synthesized click.
+        self.tip_ignore_release = False
+        self.screen_span_px = (1920, 1080)
+        self.screen_span_at = 0.0
         self.proximity_out_at = 0.0
         self.pad = None
         self.grabbed = False
@@ -828,6 +1008,7 @@ class PenDaemon:
         self.strip_speed = [0.0, 0.0]
         self.last_pen_search = 0.0
         self.last_pad_search = 0.0
+        self.access_logged = False
 
         self.pointer = None
         self.tablet = None
@@ -868,11 +1049,23 @@ class PenDaemon:
         self.last_pen_search = now + 2.0
         dev = find_pen(self.cfg.get("devices") or {})
         if dev is None:
+            perms = permission_state()
+            if perms["denied"] and not self.access_logged:
+                log("tablet access denied: " + perms["hint"])
+                self.access_logged = True
             return
+        self.access_logged = False
         self.pen = dev
         self.ax = dev.absinfo(e.ABS_X)
         self.ay = dev.absinfo(e.ABS_Y)
+        try:
+            self.press = dev.absinfo(e.ABS_PRESSURE)
+        except (OSError, ValueError):
+            self.press = None
         self.pos = [self.ax.value, self.ay.value]
+        # Warm the monitor-size cache now so the first tip-down click never
+        # has to wait on hyprctl in the input path.
+        self.screen_span()
 
         names = virtual_names(dev.name)
         if self.virtual_names is not None and names != self.virtual_names:
@@ -980,11 +1173,15 @@ class PenDaemon:
             except Exception as exc:  # noqa: BLE001
                 log(f"could not create pointer: {exc}")
                 return False
-            self.pointer_ok = wait_for_props(self.pointer.device.path, ("ID_INPUT=1",))
+            pointer_path = uinput_device_path(self.pointer)
+            if pointer_path is None:
+                log("ERROR: virtual pointer device node not found")
+                return False
+            self.pointer_ok = wait_for_props(pointer_path, ("ID_INPUT=1",))
             if not self.pointer_ok:
                 log("ERROR: virtual pointer not registered; not grabbing pen")
                 return False
-            log(f"pointer -> {self.pointer.device.path}")
+            log(f"pointer -> {pointer_path}")
 
         if self.tablet is None:
             try:
@@ -994,17 +1191,23 @@ class PenDaemon:
                 log(f"could not create tablet: {exc}")
                 self.close_tablet()
                 return False
+            tablet_path = uinput_device_path(self.tablet)
+            buttons_path = uinput_device_path(self.buttons)
+            if tablet_path is None or buttons_path is None:
+                log("ERROR: virtual tablet/buttons device node not found")
+                self.close_tablet()
+                return False
             self.tablet_ok = wait_for_props(
-                self.tablet.device.path, ("ID_INPUT_TABLET=1",)
+                tablet_path, ("ID_INPUT_TABLET=1",)
             )
-            self.buttons_ok = wait_for_props(self.buttons.device.path, ("ID_INPUT=1",))
+            self.buttons_ok = wait_for_props(buttons_path, ("ID_INPUT=1",))
             if not (self.tablet_ok and self.buttons_ok):
                 log("ERROR: virtual tablet/buttons not registered")
                 self.close_tablet()
                 return False
             log(
-                f"tablet -> {self.tablet.device.path}, "
-                f"buttons -> {self.buttons.device.path}"
+                f"tablet -> {tablet_path}, "
+                f"buttons -> {buttons_path}"
             )
         return True
 
@@ -1018,12 +1221,17 @@ class PenDaemon:
             log(f"could not create keyboard: {exc}")
             self.keyboard = None
             return False
-        self.keyboard_ok = wait_for_props(self.keyboard.device.path, ("ID_INPUT=1",))
+        keyboard_path = uinput_device_path(self.keyboard)
+        if keyboard_path is None:
+            log("ERROR: virtual keyboard device node not found")
+            self.close_keyboard()
+            return False
+        self.keyboard_ok = wait_for_props(keyboard_path, ("ID_INPUT=1",))
         if not self.keyboard_ok:
             log("ERROR: virtual keyboard not registered")
             self.close_keyboard()
             return False
-        log(f"keyboard -> {self.keyboard.device.path}")
+        log(f"keyboard -> {keyboard_path}")
         return True
 
     def close_pointer(self):
@@ -1075,6 +1283,10 @@ class PenDaemon:
         except OSError:
             pass
         self.pen = None
+        self.press = None
+        self.tip_down = False
+        self.click_anchor = None
+        self.click_unlocked = False
 
     def close_pad(self):
         if not self.pads:
@@ -1207,6 +1419,43 @@ class PenDaemon:
         return clamp(round((value - y0) / h * (self.ay.max - self.ay.min) + self.ay.min),
                      self.ay.min, self.ay.max)
 
+    def scale_pressure(self, value):
+        """Apply the configured pressure gain, keeping the tablet's own range."""
+        gain = self.cfg.get("pressureSensitivity", 1.0)
+        info = self.press
+        if info is None or info.max <= info.min or gain == 1.0:
+            return value
+        scaled = info.min + (value - info.min) * gain
+        return clamp(round(scaled), info.min, info.max)
+
+    def screen_span(self):
+        """Cached logical width/height of the monitor layout."""
+        now = time.monotonic()
+        if now - self.screen_span_at < SCREEN_SPAN_TTL:
+            return self.screen_span_px
+        self.screen_span_at = now
+        span = hyprctl_screen_span()
+        if span is not None:
+            self.screen_span_px = span
+        return self.screen_span_px
+
+    def click_deadzone(self, sx, sy):
+        """True while a tip-down movement is still just hand shake."""
+        if not self.tip_down or self.click_unlocked:
+            return False
+        if self.click_anchor is None:
+            self.click_anchor = self.screen_pos or (sx, sy)
+        ax, ay = self.click_anchor
+        width, height = self.screen_span()
+        dx = (sx - ax) * width / ABS_MAX
+        dy = (sy - ay) * height / ABS_MAX
+        if dx * dx + dy * dy <= CLICK_SHAKE_PX * CLICK_SHAKE_PX:
+            return True
+        # Once the pen has really moved, let it draw/drag normally for the
+        # rest of this contact; do not re-latch if it wanders back.
+        self.click_unlocked = True
+        return False
+
     def sync_position(self):
         if self.effective == "mouse" and self.pointer_ok:
             sx, sy = self.to_screen()
@@ -1220,6 +1469,54 @@ class PenDaemon:
             self.tablet.write(e.EV_SYN, e.SYN_REPORT, 0)
 
     # -- actions -------------------------------------------------------
+
+    def release_tip_button(self):
+        """Release whichever virtual button the pen tip is holding."""
+        dev = self.tip_device
+        code = self.tip_button
+        self.tip_button = None
+        self.tip_device = None
+        if dev is None or code is None:
+            return
+        try:
+            dev.write(e.EV_KEY, code, 0)
+            dev.write(e.EV_SYN, e.SYN_REPORT, 0)
+        except OSError:
+            pass
+
+    def set_tip_button(self, dev, code, value):
+        """Drive the tip button as a paired press/release.
+
+        A dropped press or a dropped release is repaired here: a new press
+        closes any stale contact first, and a release without a press still
+        emits a complete click. That way a physical tap always produces the
+        same press/release pair the compositor needs to count a click.
+        """
+        if value:
+            self.release_tip_button()
+            try:
+                dev.write(e.EV_KEY, code, 1)
+                dev.write(e.EV_SYN, e.SYN_REPORT, 0)
+            except OSError:
+                return
+            self.tip_button = code
+            self.tip_device = dev
+            return
+
+        if self.tip_button == code and self.tip_device is dev:
+            self.release_tip_button()
+            return
+
+        # Release without a matching press (or after a restart): synthesize a
+        # full click so the tap is not lost.
+        self.release_tip_button()
+        try:
+            dev.write(e.EV_KEY, code, 1)
+            dev.write(e.EV_SYN, e.SYN_REPORT, 0)
+            dev.write(e.EV_KEY, code, 0)
+            dev.write(e.EV_SYN, e.SYN_REPORT, 0)
+        except OSError:
+            pass
 
     def run_action(self, action, value, source, is_tip=False):
         if not valid_action(action):
@@ -1236,8 +1533,9 @@ class PenDaemon:
             ):
                 # The tip must stay a real tablet contact or pressure and
                 # drawing break. "mouse:left" on the tip means "normal tip".
-                self.tablet.write(e.EV_KEY, e.BTN_TOUCH, value)
-                self.tablet.write(e.EV_SYN, e.SYN_REPORT, 0)
+                if value or self.tip_button is None:
+                    self.sync_position()
+                self.set_tip_button(self.tablet, e.BTN_TOUCH, value)
                 return "tablet"
             target = (
                 self.pointer
@@ -1246,8 +1544,17 @@ class PenDaemon:
             )
             if target is None:
                 return None
-            target.write(e.EV_KEY, button, value)
-            target.write(e.EV_SYN, e.SYN_REPORT, 0)
+            if source == "pen" and is_tip:
+                if value or self.tip_button is None:
+                    # Park the pointer exactly on the pen before the click.
+                    # Motion may have been held by the shake filter or the
+                    # proximity guard, and clicking at an old position feels
+                    # like the click was not registered.
+                    self.sync_position()
+                self.set_tip_button(target, button, value)
+            else:
+                target.write(e.EV_KEY, button, value)
+                target.write(e.EV_SYN, e.SYN_REPORT, 0)
             return None
         if action.startswith("key:") and value:
             self.send_combo(action[4:])
@@ -1280,6 +1587,15 @@ class PenDaemon:
 
     def release_all(self):
         self.held.clear()
+        self.tip_down = False
+        self.click_anchor = None
+        self.click_unlocked = False
+        # release_all() itself lets the tip button go below; forget the pairing
+        # and swallow the matching physical release so it cannot be mistaken
+        # for a tap that lost its press.
+        self.tip_ignore_release = self.tip_button is not None
+        self.tip_button = None
+        self.tip_device = None
         targets = (
             (self.pointer, ALL_MOUSE_BUTTONS),
             (self.tablet, (e.BTN_TOUCH, e.BTN_TOOL_PEN, e.BTN_TOOL_RUBBER)),
@@ -1354,13 +1670,19 @@ class PenDaemon:
                         continue
                     self.proximity = True
                     sx, sy = self.to_screen()
+                    if self.click_deadzone(sx, sy):
+                        continue
                     self.pointer.write(e.EV_ABS, e.ABS_X, sx)
                     self.pointer.write(e.EV_ABS, e.ABS_Y, sy)
                     self.frame_pos = (sx, sy)
                     dirty_pointer = True
                 elif self.effective == "tablet":
                     if ev.code in (e.ABS_X, e.ABS_Y):
+                        if self.click_deadzone(*self.to_screen()):
+                            continue
                         self.tablet.write(e.EV_ABS, ev.code, self.to_tablet(ev.code, ev.value))
+                    elif ev.code == e.ABS_PRESSURE:
+                        self.tablet.write(e.EV_ABS, ev.code, self.scale_pressure(ev.value))
                     else:
                         self.tablet.write(e.EV_ABS, ev.code, ev.value)
                     dirty_tablet = True
@@ -1373,6 +1695,20 @@ class PenDaemon:
                     self.held.pop(ev.code, None)
 
                 if ev.code == e.BTN_TOUCH:
+                    if ev.value:
+                        self.tip_ignore_release = False
+                        if not self.tip_down:
+                            self.tip_down = True
+                            self.click_anchor = self.to_screen()
+                            self.click_unlocked = False
+                    else:
+                        self.tip_down = False
+                        self.click_anchor = None
+                        self.click_unlocked = False
+                        if self.tip_ignore_release:
+                            # release_all() already released this contact.
+                            self.tip_ignore_release = False
+                            continue
                     result = self.run_action(
                         self.mapped_action("tip"), ev.value, "pen", is_tip=True
                     )
@@ -1388,6 +1724,9 @@ class PenDaemon:
                     elif self.proximity is not False:
                         self.proximity = False
                         self.proximity_out_at = time.monotonic()
+                        self.tip_down = False
+                        self.click_anchor = None
+                        self.click_unlocked = False
                         # Lifting the pen away must not make the cursor jump
                         # or disappear: put it back where the pen left off
                         # (a pointer event also makes Hyprland show it again).
@@ -1644,6 +1983,7 @@ class PenDaemon:
             self.apply_mode(log_change=True)
 
     def status(self):
+        perms = permission_state()
         return {
             "ok": True,
             "enabled": bool(self.cfg.get("enabled", True)),
@@ -1652,6 +1992,7 @@ class PenDaemon:
             "rules": dict(self.cfg.get("rules", {})),
             "buttons": dict(self.cfg.get("buttons", {})),
             "stripSensitivity": self.cfg.get("stripSensitivity", 1.0),
+            "pressureSensitivity": self.cfg.get("pressureSensitivity", 1.0),
             "area": dict(self.cfg.get("area", {})),
             "activeClass": self.active,
             "effectiveMode": self.effective,
@@ -1672,6 +2013,11 @@ class PenDaemon:
                 "buttons": self.buttons_ok,
                 "keyboard": self.keyboard_ok,
             },
+            "inputAccess": perms["input"],
+            "uinputAccess": perms["uinput"],
+            "permissionDenied": perms["denied"],
+            "permissionHint": perms["hint"],
+            "inaccessibleTablets": perms["tablets"],
             "pid": os.getpid(),
             "uptime": round(time.time() - self.started_at, 1),
         }
@@ -1739,6 +2085,12 @@ class PenDaemon:
         elif cmd == "set-strip-sensitivity":
             self.cfg["stripSensitivity"] = clean_gain(
                 req.get("value", 1.0), self.cfg.get("stripSensitivity", 1.0)
+            )
+            save_config(self.cfg)
+
+        elif cmd == "set-pressure-sensitivity":
+            self.cfg["pressureSensitivity"] = clean_gain(
+                req.get("value", 1.0), self.cfg.get("pressureSensitivity", 1.0)
             )
             save_config(self.cfg)
 

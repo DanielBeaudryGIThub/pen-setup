@@ -21,6 +21,20 @@ rm -rf "$HOME/.config/omarchy/plugins/$PLUGIN_ID"
 rm -rf "$HOME/.config/omarchy/plugins/$LEGACY_ID"
 rm -f "$HOME/.local/bin/wacom-pen-daemon.py" "$HOME/.local/bin/wacom-pen-ctl"
 
+UDEV_RULE_DST="/etc/udev/rules.d/70-wacom-pen.rules"
+MODULE_CONF_DST="/etc/modules-load.d/wacom-pen.conf"
+if [ -f "$UDEV_RULE_DST" ] || [ -f "$MODULE_CONF_DST" ]; then
+  if [ -t 0 ] && command -v sudo >/dev/null 2>&1; then
+    sudo rm -f "$UDEV_RULE_DST" "$MODULE_CONF_DST"
+    sudo udevadm control --reload-rules >/dev/null 2>&1 || true
+    sudo udevadm trigger --action=change --subsystem-match=input >/dev/null 2>&1 || true
+    echo "  removed the tablet udev and module-load rules"
+  else
+    echo "  kept the tablet udev/module-load rules; remove them with:"
+    echo "    sudo rm -f $UDEV_RULE_DST $MODULE_CONF_DST"
+  fi
+fi
+
 if [ "$PURGE" = 1 ]; then
   rm -rf "$HOME/.config/wacom-pen"
   echo "  removed saved config"

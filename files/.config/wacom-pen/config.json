@@ -31,6 +31,7 @@
     "ring:0": "scroll:vertical"
   },
   "stripSensitivity": 1.0,
+  "pressureSensitivity": 1.0,
   "area": {
     "x": 0.0,
     "y": 0.0,

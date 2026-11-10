@@ -11,6 +11,7 @@
     wacom-pen-ctl add-app [mouse|tablet]    # add the focused window class
     wacom-pen-ctl set-button <button> <action>
     wacom-pen-ctl set-strip-sensitivity <0.25-4>
+    wacom-pen-ctl set-pressure-sensitivity <0.25-4>
     wacom-pen-ctl set-area <x> <y> <w> <h>   # normalized 0..1
     wacom-pen-ctl reset-area
     wacom-pen-ctl test-button <button>       # fire a mapped action once
@@ -57,6 +58,7 @@ DEFAULT_CONFIG = {
         "ring:0": "scroll:vertical",
     },
     "area": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+    "pressureSensitivity": 1.0,
 }
 
 
@@ -159,12 +161,19 @@ def fallback_status(error=""):
         "auto": bool(cfg.get("auto", True)),
         "rules": cfg.get("rules", {}),
         "buttons": cfg.get("buttons", {}),
+        "stripSensitivity": cfg.get("stripSensitivity", 1.0),
+        "pressureSensitivity": cfg.get("pressureSensitivity", 1.0),
         "area": cfg.get("area", {}),
         "activeClass": hyprctl_active_class(),
         "effectiveMode": "unknown",
         "standby": False,
         "penPresent": False,
         "padPresent": False,
+        "inputAccess": True,
+        "uinputAccess": True,
+        "permissionDenied": False,
+        "permissionHint": "",
+        "inaccessibleTablets": [],
         "ring": 0,
         "ringButtons": [],
         "extraButtons": [],
@@ -223,6 +232,8 @@ def print_status(out):
     print(f"effective:     {out.get('effectiveMode')}")
     print(f"auto rules:    {out.get('auto')}")
     print(f"pad:           {'present' if out.get('padPresent') else 'not found'}")
+    if out.get("permissionDenied"):
+        print(f"access:        DENIED — {out.get('permissionHint') or 'device permission missing'}")
     print(f"active window: {out.get('activeClass') or '-'}")
 
     rules = out.get("rules") or {}
@@ -342,6 +353,21 @@ def main():
         out = mutate(
             {"cmd": "set-strip-sensitivity", "value": value},
             lambda c: c.update(stripSensitivity=value),
+        )
+
+    elif cmd == "set-pressure-sensitivity":
+        if len(args) < 2:
+            log("usage: wacom-pen-ctl set-pressure-sensitivity <0.25-4>")
+            return 2
+        try:
+            value = float(args[1])
+        except ValueError:
+            log("pressure sensitivity must be a number between 0.25 and 4")
+            return 2
+        value = max(0.25, min(4.0, value))
+        out = mutate(
+            {"cmd": "set-pressure-sensitivity", "value": value},
+            lambda c: c.update(pressureSensitivity=value),
         )
 
     elif cmd == "set-area":

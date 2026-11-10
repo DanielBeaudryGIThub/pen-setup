@@ -58,6 +58,17 @@ Panel {
 
   readonly property bool daemonUp: st.daemon === true
   readonly property bool enabled: st.enabled === true
+  // The tablet is physically present, but this user cannot open its event
+  // nodes (or /dev/uinput). The daemon reports this instead of silently
+  // looking like the tablet is unplugged.
+  readonly property bool permissionDenied: st.permissionDenied === true
+  readonly property var blockedTablets: {
+    var arr = st.inaccessibleTablets || []
+    return Array.isArray(arr) ? arr : []
+  }
+  readonly property string blockedTabletName: blockedTablets.length > 0
+    ? String(blockedTablets[0].name || "") : ""
+  readonly property string permissionHint: String(st.permissionHint || "")
   readonly property string mode: st.mode || "mouse"
   readonly property string effective: st.effectiveMode || (daemonUp ? "?" : "off")
   readonly property string activeClass: st.activeClass || ""
@@ -69,6 +80,8 @@ Panel {
   // the panel just reflects that and re-renders the new tablet's layout.
   readonly property bool tabletConnected: st.penPresent === true || st.padPresent === true
   readonly property bool standby: daemonUp && enabled && !tabletConnected
+  // A tablet is plugged in but hidden from the daemon by device permissions.
+  readonly property bool tabletBlocked: permissionDenied && blockedTabletName !== ""
 
   // Tablet layout is read from the live daemon status, so the panel renders the
   // express keys and touch strips of whatever tablet is actually connected
@@ -86,8 +99,8 @@ Panel {
     return isFinite(n) && n > 0 ? 2 : 2
   }
   readonly property string tabletName: {
-    if (standby) return ""
-    var n = String(st.penName || st.padName || "").trim()
+    if (standby && !tabletBlocked) return ""
+    var n = String(st.penName || st.padName || blockedTabletName || "").trim()
     return n !== "" ? n : "Wacom tablet"
   }
 
@@ -186,8 +199,14 @@ Panel {
     return isNaN(v) || v <= 0 ? 1 : v
   }
 
+  readonly property real pressureSensitivity: {
+    var v = Number(st.pressureSensitivity)
+    return isNaN(v) || v <= 0 ? 1 : v
+  }
+
   readonly property string modeLabel: {
     if (!daemonUp) return "DAEMON NOT RUNNING"
+    if (tabletBlocked) return "TABLET FOUND · INPUT ACCESS DENIED"
     if (!enabled) return "OFF · NATIVE TABLET"
     if (standby) return "STANDBY · WAITING FOR TABLET"
     return effective === "tablet" ? "PRESSURE MODE" : "MOUSE MODE"
@@ -453,6 +472,7 @@ Panel {
     activeColor: root.standby ? root.urgent : root.accent
     tooltipText: {
       if (!root.daemonUp) return "Pen Setup · daemon not running"
+      if (root.permissionDenied) return "Pen Setup · input permission denied — re-run install.sh"
       if (!root.enabled) return "Pen Setup · off (native tablet)"
       if (root.standby) return "Pen Setup · standby — waiting for a tablet"
       return "Pen Setup · " + (root.effective === "tablet" ? "pressure" : "mouse") +
@@ -596,6 +616,45 @@ Panel {
             onClicked: root.togglePressure()
           }
 
+          Row {
+            width: parent.width
+            height: 30
+            spacing: Style.spacing.sm
+
+            Text {
+              width: parent.width - pressureDropdown.width - parent.spacing
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Pressure sensitivity"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
+            }
+
+            Dropdown {
+              id: pressureDropdown
+              width: 200
+              rowHeight: 28
+              popupRowHeight: 26
+              showLabel: false
+              value: String(root.pressureSensitivity)
+              options: [
+                { value: "0.5", label: "Firm" },
+                { value: "1", label: "Normal" },
+                { value: "2", label: "Soft" },
+                { value: "4", label: "Very soft" }
+              ]
+              foreground: root.foreground
+              background: root.bar ? root.bar.background : Color.background
+              accent: root.accent
+              fontFamily: root.fontFamily
+              onChanged: function(v) {
+                if (String(root.pressureSensitivity) === v) return
+                root.runAction(["set-pressure-sensitivity", v])
+              }
+            }
+          }
+
           Toggle {
             width: parent.width
             label: "Switch modes by app"
@@ -707,7 +766,20 @@ Panel {
           }
 
           Text {
-            visible: root.standby
+            visible: root.permissionDenied
+            text: root.permissionHint !== ""
+              ? root.permissionHint
+              : "Pen Setup cannot access the tablet's input devices. Re-run ./install.sh to install the udev rule, then restart the daemon."
+            color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            wrapMode: Text.WordWrap
+            width: parent.width
+          }
+
+          Text {
+            visible: root.standby && !root.permissionDenied
             text: "Tablet disconnected — standing by. Plug in a tablet and it resumes automatically, with that tablet's buttons and area."
             color: root.urgent
             font.family: root.fontFamily
