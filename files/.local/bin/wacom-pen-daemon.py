@@ -40,7 +40,7 @@ Active area
 
 Tip stabilisation
     While the pen tip is in contact, movement within a small radius of the
-    press point is treated as hand shake and is not forwarded (8 px in mouse
+    press point is treated as hand shake and is not forwarded (14 px in mouse
     mode, 2 px in tablet mode). This keeps a tap a clean click instead of
     letting tiny movement turn it into a drag.
 
@@ -90,9 +90,12 @@ ABS_MAX = 65535
 # than the drag threshold of the apps we click in: Blender starts a box-select
 # drag after 3 px of *mouse* movement (it allows 10 px for real tablets), and a
 # smaller guard let a slightly shaky tap turn into a tiny, usually empty, box
-# selection, which looks exactly like a missed click. Tablet mode keeps a small
-# radius so a stroke still starts precisely where the tip lands.
-CLICK_SHAKE_PX = 8.0
+# selection, which looks exactly like a missed click.
+#
+# Measured on an Intuos3 (271 mm mapped to a 4096 px layout, ~15 px/mm) over
+# 110 taps: median drift 4.0 px, p90 8.5 px, max 11.3 px. 14 px leaves margin
+# while still unlocking as soon as a drag really starts.
+CLICK_SHAKE_PX = 14.0
 CLICK_SHAKE_TABLET_PX = 2.0
 SCREEN_SPAN_TTL = 30.0
 
@@ -949,6 +952,7 @@ class PenDaemon:
         self.ay = None
         self.press = None
         self.pos = [0, 0]
+        self.pressure = 0
         # Pen proximity (None = not seen yet, True = hovering, False = lifted).
         # Mouse mode uses it to ignore the coordinates a tablet reports while
         # the pen is out of range, and to re-send the last good position on
@@ -1459,7 +1463,11 @@ class PenDaemon:
         dy = (sy - ay) * height / ABS_MAX
         radius = CLICK_SHAKE_TABLET_PX if self.effective == "tablet" else CLICK_SHAKE_PX
         if dx * dx + dy * dy <= radius * radius:
+            if DEBUG:
+                debug(f"shake held: moved {dx:.1f},{dy:.1f} px from anchor")
             return True
+        if DEBUG:
+            debug(f"shake unlocked: moved {dx:.1f},{dy:.1f} px from anchor")
         # Once the pen has really moved, let it draw/drag normally for the
         # rest of this contact; do not re-latch if it wanders back.
         self.click_unlocked = True
@@ -1669,6 +1677,8 @@ class PenDaemon:
                     self.pos[0] = ev.value
                 elif ev.code == e.ABS_Y:
                     self.pos[1] = ev.value
+                elif ev.code == e.ABS_PRESSURE:
+                    self.pressure = ev.value
 
                 if self.effective == "mouse" and ev.code in (e.ABS_X, e.ABS_Y):
                     # Out of range a tablet may still report (zeroed)
@@ -1704,6 +1714,13 @@ class PenDaemon:
                     self.held.pop(ev.code, None)
 
                 if ev.code == e.BTN_TOUCH:
+                    if DEBUG:
+                        debug(
+                            f"tip {'down' if ev.value else 'up'} "
+                            f"t={ev.timestamp():.4f} "
+                            f"pos={self.pos[0]},{self.pos[1]} "
+                            f"pressure={self.pressure} mode={self.effective}"
+                        )
                     if ev.value:
                         self.tip_ignore_release = False
                         if not self.tip_down:
