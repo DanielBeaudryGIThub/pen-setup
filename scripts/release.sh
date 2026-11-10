@@ -79,7 +79,7 @@ git push origin HEAD
 git push origin "v$VERSION"
 
 # 4. publish (or refresh) the GitHub release ---------------------------------
-NOTES="Pen Setup $VERSION — auto-built package ($ZIP and $SUMS)."
+NOTES="Pen Setup $VERSION — auto-built package ($(basename "$ZIP") and $(basename "$SUMS"))."
 if gh release view "v$VERSION" --repo "$REPO" >/dev/null 2>&1; then
   echo "  release v$VERSION already exists; uploading assets"
   gh release upload "v$VERSION" "$ZIP" "$SUMS" --repo "$REPO" --clobber
