@@ -29,7 +29,7 @@ Grab the latest package from **[Releases](https://github.com/DanielBeaudryGIThub
 |---|---|
 | **Mouse / pressure mode** | One toggle switches the pen between a plain absolute pointer and a pressure+tilting virtual tablet. |
 | **Pressure sensitivity** | Four levels (Firm / Normal / Soft / Very soft) scale how quickly pen pressure builds up in pressure mode. |
-| **Stable tip clicks** | While the tip is down, up to 2 px of hand shake is ignored so a tap stays a clean click instead of drifting into a drag. |
+| **Stable tip clicks** | While the tip is down, up to 8 px of hand shake is ignored in mouse mode (2 px in tablet mode) so a tap stays a clean click instead of drifting into a drag. |
 | **Per-application rules** | Switch modes automatically by window class (`*krita*`, `*gimp*`, `*inkscape*`, `*xournal*` are pre-seeded). Add the focused app from the panel with one click. |
 | **Button mapping** | Pen tip, both barrel buttons, the pad's express keys and touch strips — map each to a mouse action, a scroll action or a keyboard shortcut. |
 | **Tablet active area** | Drag the corners in the panel to crop the tablet to the part of the screen you want. |
@@ -107,7 +107,8 @@ The installer is idempotent: re-running it keeps your existing
 - **Button mapping** — pen tip, barrel buttons, express keys, touch strips.
 - **Scroll sensitivity** — Gentle / Normal / Fast / Very fast.
 - **Pressure sensitivity** — Firm / Normal / Soft / Very soft.
-- **Tip click stabilisation** — movement under 2 px while the tip is down is
+- **Tip click stabilisation** — movement under 8 px (mouse mode) / 2 px
+  (tablet mode) while the tip is down is
   treated as shake, so a tap does not turn into a drag.
 - **Switch modes by app** — turn the per-app rules on or off.
 

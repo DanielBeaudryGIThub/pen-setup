@@ -39,9 +39,10 @@ Active area
     mode, so cropping the tablet here crops it for every application.
 
 Tip stabilisation
-    While the pen tip is in contact, movement within a 2-pixel radius of the
-    press point is treated as hand shake and is not forwarded. This keeps a tap
-    a clean click instead of letting tiny movement turn it into a drag.
+    While the pen tip is in contact, movement within a small radius of the
+    press point is treated as hand shake and is not forwarded (8 px in mouse
+    mode, 2 px in tablet mode). This keeps a tap a clean click instead of
+    letting tiny movement turn it into a drag.
 
 Control socket: $XDG_RUNTIME_DIR/wacom-pen.sock
 Config:         ~/.config/wacom-pen/config.json
@@ -83,9 +84,16 @@ PAD_KEY_CODES = tuple(range(e.BTN_0, e.BTN_9 + 1))
 MIN_PAD_KEYS = 2
 ABS_MAX = 65535
 # A pen tap must stay a click. While the tip is down, pointer movement within
-# this radius (in screen pixels) is treated as hand shake and not forwarded,
-# so a micro-movement cannot turn the click into a drag before it is released.
-CLICK_SHAKE_PX = 2.0
+# this radius (in logical screen pixels) is treated as hand shake and not
+# forwarded, so a micro-movement cannot turn the click into a drag before it is
+# released. Mouse mode presents the pen as a mouse, so the radius must be larger
+# than the drag threshold of the apps we click in: Blender starts a box-select
+# drag after 3 px of *mouse* movement (it allows 10 px for real tablets), and a
+# smaller guard let a slightly shaky tap turn into a tiny, usually empty, box
+# selection, which looks exactly like a missed click. Tablet mode keeps a small
+# radius so a stroke still starts precisely where the tip lands.
+CLICK_SHAKE_PX = 8.0
+CLICK_SHAKE_TABLET_PX = 2.0
 SCREEN_SPAN_TTL = 30.0
 
 CONFIG_DIR = os.path.expanduser("~/.config/wacom-pen")
@@ -1449,7 +1457,8 @@ class PenDaemon:
         width, height = self.screen_span()
         dx = (sx - ax) * width / ABS_MAX
         dy = (sy - ay) * height / ABS_MAX
-        if dx * dx + dy * dy <= CLICK_SHAKE_PX * CLICK_SHAKE_PX:
+        radius = CLICK_SHAKE_TABLET_PX if self.effective == "tablet" else CLICK_SHAKE_PX
+        if dx * dx + dy * dy <= radius * radius:
             return True
         # Once the pen has really moved, let it draw/drag normally for the
         # rest of this contact; do not re-latch if it wanders back.
